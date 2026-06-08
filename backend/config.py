@@ -51,7 +51,11 @@ class Settings:
     # webrtcvad aggressiveness 0..3 (3 = most aggressive at calling things silence).
     VAD_AGGRESSIVENESS = _i("RT_VAD_AGGRESSIVENESS", 2)
     # How often to re-transcribe the in-progress utterance and emit an interim.
-    INTERIM_INTERVAL_MS = _i("RT_INTERIM_INTERVAL_MS", 500)
+    INTERIM_INTERVAL_MS = _i("RT_INTERIM_INTERVAL_MS", 700)
+    # Interim ASR only re-transcribes the most recent N ms of the utterance, so
+    # cost stays flat as a sentence grows (instead of re-running the whole 12s
+    # buffer every 0.5s). Finals always use the FULL utterance for accuracy.
+    INTERIM_WINDOW_MS = _i("RT_INTERIM_WINDOW_MS", 6000)
 
     # --- Translation LLM (OpenAI-compatible endpoint) ---
     # Local:  http://localhost:11434/v1  (Ollama)

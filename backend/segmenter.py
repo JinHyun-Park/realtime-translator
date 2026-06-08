@@ -94,7 +94,13 @@ class Segmenter:
         if self._ms_since_interim >= settings.INTERIM_INTERVAL_MS and \
                 self._speech_ms >= settings.MIN_SPEECH_MS:
             self._ms_since_interim = 0
-            events.append(SegEvent("interim", bytes(self._buf), self._seq))
+            # Only transcribe the most recent window so interim cost stays flat
+            # as the utterance grows. Finals (below) still use the full buffer.
+            window_bytes = int(settings.INTERIM_WINDOW_MS / settings.FRAME_MS) \
+                * settings.frame_bytes
+            tail = bytes(self._buf[-window_bytes:]) if len(self._buf) > window_bytes \
+                else bytes(self._buf)
+            events.append(SegEvent("interim", tail, self._seq))
 
         # Finalize on a long-enough pause OR a runaway-length safety flush.
         long_pause = self._silence_ms >= settings.MIN_SILENCE_MS

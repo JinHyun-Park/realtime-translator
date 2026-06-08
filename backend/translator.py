@@ -74,10 +74,14 @@ class Translator:
             messages.append({"role": "system", "content": ctx})
         messages.append({"role": "user", "content": text})
 
+        # Interims use greedy decoding (temperature 0) so the same growing
+        # phrase maps to a STABLE translation instead of flickering between
+        # synonyms on every refresh. Finals keep the configured temperature.
+        temperature = 0.0 if not final else settings.LLM_TEMPERATURE
         resp = await self.client.chat.completions.create(
             model=settings.LLM_MODEL,
             messages=messages,
-            temperature=settings.LLM_TEMPERATURE,
+            temperature=temperature,
             stream=False,
             extra_body={"chat_template_kwargs": {"enable_thinking": False}},
         )
