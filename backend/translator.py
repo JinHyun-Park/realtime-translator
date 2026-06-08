@@ -12,6 +12,7 @@ Two things make the output not-awkward:
 """
 from __future__ import annotations
 
+import asyncio
 import collections
 
 from openai import AsyncOpenAI
@@ -78,14 +79,30 @@ class Translator:
         # phrase maps to a STABLE translation instead of flickering between
         # synonyms on every refresh. Finals keep the configured temperature.
         temperature = 0.0 if not final else settings.LLM_TEMPERATURE
-        resp = await self.client.chat.completions.create(
-            model=settings.LLM_MODEL,
-            messages=messages,
-            temperature=temperature,
-            stream=False,
-            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
-        )
-        out = (resp.choices[0].message.content or "").strip()
+
+        # Stability: a transient LLM hiccup must never break the session. Retry
+        # finals a couple times; for interims, one quick try then give up (a
+        # newer interim is coming anyway). On total failure return "" so the
+        # relay keeps running instead of surfacing an error to the UI.
+        attempts = 3 if final else 1
+        out = ""
+        for i in range(attempts):
+            try:
+                resp = await self.client.chat.completions.create(
+                    model=settings.LLM_MODEL,
+                    messages=messages,
+                    temperature=temperature,
+                    stream=False,
+                    timeout=settings.LLM_TIMEOUT,
+                    extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+                )
+                out = (resp.choices[0].message.content or "").strip()
+                break
+            except Exception:
+                if i == attempts - 1:
+                    return "", tgt
+                await asyncio.sleep(0.4 * (i + 1))
+
         # Only finals shape future context (interims are noisy/half-formed).
         if final and out:
             self._history.append((text, out))

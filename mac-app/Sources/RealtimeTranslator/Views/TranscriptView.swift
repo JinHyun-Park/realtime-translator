@@ -8,17 +8,29 @@ struct TranscriptView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
+            HStack(spacing: 10) {
                 Text("Translation").font(.headline)
                 Spacer()
                 Toggle("Show original", isOn: $showSource)
                     .toggleStyle(.switch).controlSize(.mini)
+                Button { model.exportMarkdown() } label: {
+                    Label("Export .md", systemImage: "square.and.arrow.down")
+                }
+                .controlSize(.small)
+                .disabled(model.lines.isEmpty)
+                Button(role: .destructive) { model.clearTranscript() } label: {
+                    Label("Clear", systemImage: "trash")
+                }
+                .controlSize(.small)
+                .disabled(model.lines.isEmpty)
             }
             .padding(.horizontal, 14).padding(.vertical, 8)
             Divider()
 
             ScrollViewReader { proxy in
                 ScrollView {
+                    // textSelection lets the user drag-select & copy lines, but
+                    // Text views are inherently read-only (no typing into them).
                     LazyVStack(alignment: .leading, spacing: 14) {
                         ForEach(model.lines) { line in
                             LineRow(line: line, showSource: showSource, dim: false)
@@ -29,6 +41,7 @@ struct TranscriptView: View {
                                 .id(-1)
                         }
                     }
+                    .textSelection(.enabled)
                     .padding(16)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }

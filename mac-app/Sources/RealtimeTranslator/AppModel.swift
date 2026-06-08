@@ -2,10 +2,13 @@ import AVFoundation
 import Combine
 import CoreAudio
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// One translated line shown in the transcript.
+/// `id` is globally unique across sessions (epoch*1e6 + relay seq) so the
+/// transcript can accumulate across stop/start without seq collisions.
 struct Line: Identifiable {
-    let id: Int            // seq from relay
+    let id: Int
     var source: String
     var translation: String
     var src: String
@@ -43,6 +46,9 @@ final class AppModel: ObservableObject {
     private var sysCapture: AnyObject?     // SystemAudioCapture (macOS 13+)
     private let client = RelayClient()
     private let deviceWatcher = AudioDeviceWatcher()
+    // Bumped on every start() so relay seq (which resets per connection) maps to
+    // a globally-unique line id and the transcript accumulates across sessions.
+    private var epoch = 0
 
     init() {
         refreshDevices()
@@ -80,18 +86,13 @@ final class AppModel: ObservableObject {
         guard let url = URL(string: serverURL) else {
             status = "Bad server URL"; return
         }
-        lines.removeAll()
+        // Keep prior transcript — a new session continues appending below it.
+        epoch += 1
         interim = nil
-        sentChunks = 0
-        micSamples = 0
-        sysSamples = 0
         client.connect(url: url)
         client.setPair(langA, langB)
 
-        mixer.onChunk = { [weak self] data in
-            self?.sentChunks += 1
-            self?.client.sendAudio(data)
-        }
+        mixer.onChunk = { [weak self] data in self?.client.sendAudio(data) }
         mixer.start()
 
         // Mic needs explicit TCC authorization; request it before tapping.
@@ -105,7 +106,6 @@ final class AppModel: ObservableObject {
 
         running = true
         status = "Listening…"
-        startMeter()
     }
 
     private func requestMicThenStart() {
@@ -113,15 +113,10 @@ final class AppModel: ObservableObject {
             guard let self else { return }
             do {
                 try self.mic.setInputDevice(self.selectedInputID)
-                self.mic.onSamples = { [weak self] s in
-                    self?.micSamples += s.count
-                    self?.mixer.pushMic(s)
-                }
+                self.mic.onSamples = { [weak self] s in self?.mixer.pushMic(s) }
                 try self.mic.start()
-                NSLog("RT mic started")
             } catch {
                 self.status = "Mic error: \(error.localizedDescription)"
-                NSLog("RT mic error: \(error.localizedDescription)")
             }
         }
         switch AVCaptureDevice.authorizationStatus(for: .audio) {
@@ -132,35 +127,18 @@ final class AppModel: ObservableObject {
             AVCaptureDevice.requestAccess(for: .audio) { granted in
                 Task { @MainActor in
                     if granted { begin() }
-                    else { self.status = "Mic permission DENIED — enable in System Settings ▸ Privacy ▸ Microphone" }
+                    else { self.status = "Mic permission DENIED — System Settings ▸ Privacy ▸ Microphone" }
                 }
             }
         default:
             status = "Mic permission denied — System Settings ▸ Privacy ▸ Microphone"
-            NSLog("RT mic not authorized")
-        }
-    }
-
-    // Diagnostics: log audio flow once a second so we can see where it stalls.
-    private var sentChunks = 0
-    private var micSamples = 0
-    private var sysSamples = 0
-    private var meter: Timer?
-    private func startMeter() {
-        meter?.invalidate()
-        meter = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            guard let self else { return }
-            NSLog("RT flow: mic=\(self.micSamples) sys=\(self.sysSamples) chunksSent=\(self.sentChunks) connected=\(self.client.isConnected)")
         }
     }
 
     private func startSystemAudio() {
         if #available(macOS 13.0, *) {
             let cap = SystemAudioCapture()
-            cap.onSamples = { [weak self] s in
-                self?.sysSamples += s.count
-                self?.mixer.pushSystem(s)
-            }
+            cap.onSamples = { [weak self] s in self?.mixer.pushSystem(s) }
             sysCapture = cap
             Task {
                 do { try await cap.start() }
@@ -176,7 +154,6 @@ final class AppModel: ObservableObject {
     }
 
     func stop() {
-        meter?.invalidate(); meter = nil
         mic.stop()
         if #available(macOS 13.0, *), let cap = sysCapture as? SystemAudioCapture {
             cap.stop()
@@ -195,15 +172,17 @@ final class AppModel: ObservableObject {
 
     // MARK: - Relay messages
 
+    /// Map a per-connection relay seq to a globally-unique line id.
+    private func lineID(_ seq: Int) -> Int { epoch * 1_000_000 + seq }
+
     private func handle(_ msg: RelayMessage) {
-        NSLog("RT recv: type=\(msg.type) seq=\(msg.seq ?? -1) tr=\(msg.translation ?? "")")
         switch msg.type {
         case "error":
             status = "Relay: \(msg.message ?? "error")"
         case "interim":
             guard let seq = msg.seq else { return }
             interim = Line(
-                id: seq,
+                id: lineID(seq),
                 source: msg.source ?? "",
                 translation: msg.translation ?? "",
                 src: msg.src ?? "", tgt: msg.tgt ?? "",
@@ -211,21 +190,59 @@ final class AppModel: ObservableObject {
             )
         case "final":
             guard let seq = msg.seq else { return }
+            let uid = lineID(seq)
             let line = Line(
-                id: seq,
+                id: uid,
                 source: msg.source ?? "",
                 translation: msg.translation ?? "",
                 src: msg.src ?? "", tgt: msg.tgt ?? "",
                 isFinal: true
             )
-            if let idx = lines.firstIndex(where: { $0.id == seq }) {
+            if let idx = lines.firstIndex(where: { $0.id == uid }) {
                 lines[idx] = line
             } else {
                 lines.append(line)
             }
-            if interim?.id == seq { interim = nil }
+            if interim?.id == uid { interim = nil }
         default:
             break
+        }
+    }
+
+    // MARK: - Transcript actions
+
+    /// Explicitly clear the accumulated transcript (the only way to wipe it —
+    /// start/stop preserves it).
+    func clearTranscript() {
+        lines.removeAll()
+        interim = nil
+    }
+
+    /// Render the full transcript as Markdown.
+    func transcriptMarkdown() -> String {
+        var out = "# Translation transcript\n\n"
+        for l in lines {
+            out += "- **\(l.src.uppercased())** \(l.source)\n"
+            out += "  - **\(l.tgt.uppercased())** \(l.translation)\n"
+        }
+        return out
+    }
+
+    /// Save the transcript to a .md file via a save panel. Returns nothing;
+    /// updates `status` with the result.
+    func exportMarkdown() {
+        guard !lines.isEmpty else { status = "Nothing to export"; return }
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.init(filenameExtension: "md")!]
+        panel.nameFieldStringValue = "translation-transcript.md"
+        panel.begin { [weak self] resp in
+            guard let self, resp == .OK, let url = panel.url else { return }
+            do {
+                try self.transcriptMarkdown().write(to: url, atomically: true, encoding: .utf8)
+                Task { @MainActor in self.status = "Saved \(url.lastPathComponent)" }
+            } catch {
+                Task { @MainActor in self.status = "Save failed: \(error.localizedDescription)" }
+            }
         }
     }
 }

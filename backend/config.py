@@ -37,6 +37,14 @@ class Settings:
     ASR_DEVICE = _s("RT_ASR_DEVICE", "auto")    # "cuda" | "cpu" | "auto"
     ASR_COMPUTE = _s("RT_ASR_COMPUTE", "auto")  # "float16" on GPU, "int8" on CPU
     ASR_BEAM = _i("RT_ASR_BEAM", 1)             # interim uses 1 for speed
+    # --- hallucination suppression thresholds ---
+    # If a segment's no-speech probability is above this, treat it as silence
+    # (drops the "Thank you for watching" type invented text). Higher = stricter.
+    ASR_NO_SPEECH_THRESHOLD = _f("RT_ASR_NO_SPEECH_THRESHOLD", 0.6)
+    # Segments whose average token log-prob is below this are discarded.
+    ASR_LOGPROB_THRESHOLD = _f("RT_ASR_LOGPROB_THRESHOLD", -1.0)
+    # Repetitive/garbage text compresses well; above this ratio = likely junk.
+    ASR_COMPRESSION_THRESHOLD = _f("RT_ASR_COMPRESSION_THRESHOLD", 2.4)
 
     # --- Endpointing / anti-cut knobs (THE important ones) ---
     # How long a pause must last before we LOCK a sentence. Bigger = waits more,
@@ -64,6 +72,8 @@ class Settings:
     LLM_API_KEY = _s("RT_LLM_API_KEY", "sk-no-key-required")
     LLM_MODEL = _s("RT_LLM_MODEL", "qwen3:32b")
     LLM_TEMPERATURE = _f("RT_LLM_TEMPERATURE", 0.2)
+    # Per-request timeout (seconds) so a stuck LLM call can't wedge a session.
+    LLM_TIMEOUT = _f("RT_LLM_TIMEOUT", 20.0)
     # How many previous final sentences to feed as context for coherence.
     CONTEXT_WINDOW = _i("RT_CONTEXT_WINDOW", 3)
 

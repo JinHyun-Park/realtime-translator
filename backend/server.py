@@ -41,11 +41,28 @@ ASR_LOCK = asyncio.Lock()
 
 
 async def run_asr(pcm: bytes, interim: bool):
-    async with ASR_LOCK:
-        return await asyncio.to_thread(ASR.transcribe, pcm, interim)
+    # Retry a transient ASR failure once; never let it bubble up and kill the
+    # session. Returns None on hard failure so the caller skips this segment.
+    for attempt in range(2):
+        try:
+            async with ASR_LOCK:
+                return await asyncio.to_thread(ASR.transcribe, pcm, interim)
+        except Exception:
+            if attempt == 1:
+                log.exception("ASR failed, skipping segment")
+                return None
+            await asyncio.sleep(0.2)
 
 
 async def handle(ws):
+    # Top-level guard: no single client session can ever take down the server.
+    try:
+        await _handle(ws)
+    except Exception:
+        log.exception("unhandled session error (server stays up)")
+
+
+async def _handle(ws):
     peer = getattr(ws, "remote_address", "?")
     log.info("client connected: %s", peer)
     seg = Segmenter()
@@ -59,7 +76,7 @@ async def handle(ws):
     async def process(ev, is_final: bool):
         try:
             res = await run_asr(ev.pcm, interim=not is_final)
-            if not res.text.strip():
+            if res is None or not res.text.strip():
                 return
             translation, tgt = await tr.translate(
                 res.text, res.language, pair, final=is_final
@@ -95,24 +112,35 @@ async def handle(ws):
 
     try:
         async for message in ws:
-            if isinstance(message, bytes):
-                await dispatch(seg.add_audio(message))
-            else:
-                try:
-                    msg = json.loads(message)
-                except json.JSONDecodeError:
-                    continue
-                if msg.get("type") == "config":
-                    p = msg.get("pair")
-                    if isinstance(p, list) and len(p) == 2:
-                        pair = (p[0], p[1])
-                        log.info("pair set to %s", pair)
-                elif msg.get("type") == "end":
-                    await dispatch(seg.flush())
+            # A bad single frame must never drop the whole session.
+            try:
+                if isinstance(message, bytes):
+                    await dispatch(seg.add_audio(message))
+                else:
+                    try:
+                        msg = json.loads(message)
+                    except json.JSONDecodeError:
+                        continue
+                    if msg.get("type") == "config":
+                        p = msg.get("pair")
+                        if isinstance(p, list) and len(p) == 2:
+                            pair = (p[0], p[1])
+                            log.info("pair set to %s", pair)
+                    elif msg.get("type") == "end":
+                        await dispatch(seg.flush())
+            except websockets.ConnectionClosed:
+                raise
+            except Exception:
+                log.exception("error handling frame, continuing")
     except websockets.ConnectionClosed:
         pass
+    except Exception:
+        log.exception("session loop error")
     finally:
-        await dispatch(seg.flush())
+        try:
+            await dispatch(seg.flush())
+        except Exception:
+            pass
         log.info("client disconnected: %s", peer)
 
 
