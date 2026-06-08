@@ -1,0 +1,20 @@
+# Swift / SwiftPM
+mac-app/.build/
+mac-app/RealtimeTranslator.app/
+*.xcodeproj
+.swiftpm/
+
+# Python
+backend/.venv/
+**/__pycache__/
+*.pyc
+
+# Local env (may contain endpoints/keys)
+backend/.env.local
+backend/.env.tokyo
+
+# Deploy state (instance id is environment-specific, not source)
+deploy/.instance-id
+
+# OS
+.DS_Store
