@@ -1,4 +1,5 @@
 import AVFoundation
+import CoreGraphics
 import ScreenCaptureKit
 
 /// Captures system (speaker) audio using ScreenCaptureKit's audio-only stream.
@@ -11,12 +12,18 @@ final class SystemAudioCapture: NSObject, SCStreamOutput {
     var onSamples: (([Float]) -> Void)?
 
     func start() async throws {
+        rtlog("sys: preflight=\(CGPreflightScreenCaptureAccess())")
+        // Don't hard-fail on preflight (it can be a false negative for binaries
+        // launched oddly). Instead try to enumerate content; if THAT fails or is
+        // empty, the permission genuinely isn't there.
         let content = try await SCShareableContent.excludingDesktopWindows(
             false, onScreenWindowsOnly: false
         )
+        rtlog("sys: shareable displays=\(content.displays.count) apps=\(content.applications.count)")
         guard let display = content.displays.first else {
             throw NSError(domain: "rt.sys", code: 1,
-                          userInfo: [NSLocalizedDescriptionKey: "No display found"])
+                          userInfo: [NSLocalizedDescriptionKey:
+                            "No display available — Screen Recording permission likely missing."])
         }
         // Capture the whole display but we only consume the audio track.
         let filter = SCContentFilter(display: display, excludingWindows: [])
@@ -43,11 +50,17 @@ final class SystemAudioCapture: NSObject, SCStreamOutput {
         stream = nil
     }
 
+    private var loggedFirst = false
+
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer,
                 of type: SCStreamOutputType) {
         guard type == .audio,
               let buf = pcmBuffer(from: sampleBuffer) else { return }
         let samples = resampler.resample(buf)
+        if !loggedFirst {
+            loggedFirst = true
+            rtlog("sys: first audio sampleBuffer received (\(samples.count) samples)")
+        }
         if !samples.isEmpty { onSamples?(samples) }
     }
 

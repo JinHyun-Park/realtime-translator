@@ -37,6 +37,11 @@ struct ControlPanel: View {
                                 .frame(width: 9, height: 9)
                             Text(model.status).font(.caption).foregroundStyle(.secondary)
                         }
+                        if model.running && !model.flowInfo.isEmpty {
+                            Text(model.flowInfo)
+                                .font(.caption2).monospaced()
+                                .foregroundStyle(.secondary)
+                        }
                     }.padding(6)
                 }
 

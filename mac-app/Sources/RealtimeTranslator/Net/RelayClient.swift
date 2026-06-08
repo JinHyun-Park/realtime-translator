@@ -19,6 +19,9 @@ struct RelayMessage: Decodable {
 /// relay restart never ends the session. The current language pair is re-sent on
 /// every (re)connect.
 final class RelayClient: NSObject, URLSessionWebSocketDelegate {
+    let name: String                       // "mic" | "system" — for diagnostics/logging
+    init(name: String) { self.name = name; super.init() }
+
     private var task: URLSessionWebSocketTask?
     private lazy var session = URLSession(configuration: .default,
                                           delegate: self, delegateQueue: nil)

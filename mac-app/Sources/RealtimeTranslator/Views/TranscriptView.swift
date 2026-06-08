@@ -36,9 +36,11 @@ struct TranscriptView: View {
                             LineRow(line: line, showSource: showSource, dim: false)
                                 .id(line.id)
                         }
-                        if let it = model.interim {
-                            LineRow(line: it, showSource: showSource, dim: true)
-                                .id(-1)
+                        if let m = model.micInterim {
+                            LineRow(line: m, showSource: showSource, dim: true).id(-1)
+                        }
+                        if let s = model.sysInterim {
+                            LineRow(line: s, showSource: showSource, dim: true).id(-2)
                         }
                     }
                     .textSelection(.enabled)
@@ -48,8 +50,11 @@ struct TranscriptView: View {
                 .onChange(of: model.lines.count) { _, _ in
                     withAnimation { proxy.scrollTo(model.lines.last?.id ?? -1, anchor: .bottom) }
                 }
-                .onChange(of: model.interim?.translation) { _, _ in
+                .onChange(of: model.micInterim?.translation) { _, _ in
                     withAnimation { proxy.scrollTo(-1, anchor: .bottom) }
+                }
+                .onChange(of: model.sysInterim?.translation) { _, _ in
+                    withAnimation { proxy.scrollTo(-2, anchor: .bottom) }
                 }
             }
         }
@@ -61,10 +66,16 @@ private struct LineRow: View {
     let showSource: Bool
     let dim: Bool
 
+    private var isMic: Bool { line.stream == "mic" }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
-            if showSource {
-                HStack(spacing: 6) {
+            HStack(spacing: 6) {
+                // Speaker badge — always shown so a line is attributable even
+                // when "Show original" is off. ME = my mic, THEM = system audio.
+                Tag(text: isMic ? "ME" : "THEM")
+                    .foregroundStyle(isMic ? Color.blue : Color.green)
+                if showSource {
                     Tag(text: line.src.uppercased())
                     Text(line.source)
                         .font(.callout)
