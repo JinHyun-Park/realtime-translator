@@ -51,7 +51,9 @@ struct Line: Identifiable {
 final class AppModel: ObservableObject {
     // Connection
     // Default points at the SSM port-forward (deploy/connect.sh maps 18765 -> Tokyo:8765).
-    @Published var serverURL = "ws://localhost:18765"
+    // Team deployment: CloudFront edge (wss). For local dev via SSM tunnel use
+    // ws://localhost:18765. Editable at runtime in the server field.
+    @Published var serverURL = "wss://dv7fu8km0bcfp.cloudfront.net"
     @Published var connected = false
     @Published var running = false
     @Published var status = "Idle"

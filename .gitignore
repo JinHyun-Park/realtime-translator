@@ -1,6 +1,7 @@
 # Swift / SwiftPM
 mac-app/.build/
 mac-app/RealtimeTranslator.app/
+mac-app/RealtimeTranslator.dmg
 *.xcodeproj
 .swiftpm/
 
@@ -13,8 +14,9 @@ backend/.venv/
 backend/.env.local
 backend/.env.tokyo
 
-# Deploy state (instance id is environment-specific, not source)
+# Deploy state (environment-specific, not source)
 deploy/.instance-id
+deploy/.cloudfront-id
 
 # OS
 .DS_Store
