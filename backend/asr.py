@@ -66,7 +66,7 @@ class AsrResult:
 
 
 class Asr:
-    def __init__(self):
+    def __init__(self, device_index: int = 0):
         from faster_whisper import WhisperModel
 
         device = settings.ASR_DEVICE
@@ -80,8 +80,14 @@ class Asr:
         if compute == "auto":
             compute = "float16" if device == "cuda" else "int8"
 
+        # Pin this replica to a specific GPU so a pool of workers spreads across
+        # all cards (multi-GPU boxes); ignored on CPU.
+        kwargs = {}
+        if device == "cuda":
+            kwargs["device_index"] = device_index
+
         self.model = WhisperModel(
-            settings.ASR_MODEL, device=device, compute_type=compute
+            settings.ASR_MODEL, device=device, compute_type=compute, **kwargs
         )
         self.device = device
 

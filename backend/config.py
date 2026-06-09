@@ -37,6 +37,13 @@ class Settings:
     ASR_DEVICE = _s("RT_ASR_DEVICE", "auto")    # "cuda" | "cpu" | "auto"
     ASR_COMPUTE = _s("RT_ASR_COMPUTE", "auto")  # "float16" on GPU, "int8" on CPU
     ASR_BEAM = _i("RT_ASR_BEAM", 1)             # interim uses 1 for speed
+    # --- concurrency (for many simultaneous users) ---
+    # Number of faster-whisper model replicas. Each replica ≈ 3–5 GB VRAM and
+    # adds one lane of concurrent transcription (the old single-lock design
+    # serialized ALL users through one model). Set ~5 per dedicated L40S.
+    ASR_WORKERS = _i("RT_ASR_WORKERS", 1)
+    # GPUs to spread the replicas across (round-robin device_index).
+    ASR_NUM_GPUS = _i("RT_ASR_NUM_GPUS", 1)
     # --- hallucination suppression thresholds ---
     # If a segment's no-speech probability is above this, treat it as silence
     # (drops the "Thank you for watching" type invented text). Higher = stricter.

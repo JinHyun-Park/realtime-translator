@@ -10,9 +10,13 @@ set -uo pipefail
 cd "$(dirname "$0")"
 
 REGION=ap-northeast-1
-SG=sg-0cda40c3ca86f6b4d
 PL=pl-58a04531
 DIST_ID="$(cat .cloudfront-id 2>/dev/null || true)"
+# Resolve the SG from the CURRENT instance (avoids stale hardcoded IDs after a
+# cutover to a new box).
+IID="$(cat .instance-id 2>/dev/null || true)"
+SG="$(aws ec2 describe-instances --region "$REGION" --instance-ids "$IID" \
+  --query 'Reservations[0].Instances[0].SecurityGroups[0].GroupId' --output text 2>/dev/null || true)"
 
 if [ -z "$DIST_ID" ]; then
   echo "no deploy/.cloudfront-id found — nothing to delete (skipping CF)."

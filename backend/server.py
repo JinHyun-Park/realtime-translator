@@ -14,11 +14,13 @@ Protocol (client <-> server), all text frames are JSON; binary frames are audio:
     - {"type":"error","message":"..."}
 
 Each connection gets its own Segmenter + Translator (context history is
-per-connection). ASR model is shared (loaded once).
+per-connection). ASR runs as a POOL of N replicas (RT_ASR_WORKERS) so many
+users transcribe concurrently instead of serializing through one model.
 """
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import json
 import logging
 
@@ -34,24 +36,35 @@ logging.basicConfig(
 )
 log = logging.getLogger("relay")
 
-# Shared ASR (heavy). Loaded once at startup.
-ASR: Asr | None = None
-# Serialize ASR calls — one GPU/CPU model, avoid thrash.
-ASR_LOCK = asyncio.Lock()
+# Pool of ASR model replicas for CONCURRENT transcription. The old design used a
+# single model behind one asyncio.Lock, which serialized every user's audio
+# through one lane (fine for 1–2 users, a bottleneck for 20). Now N replicas run
+# in parallel: a Semaphore bounds in-flight work to the pool size, a dedicated
+# thread pool runs the blocking transcribe calls, and we round-robin replicas.
+ASR_POOL: list[Asr] = []
+ASR_SEM: asyncio.Semaphore | None = None
+ASR_EXEC: concurrent.futures.ThreadPoolExecutor | None = None
+_asr_rr = 0
 
 
 async def run_asr(pcm: bytes, interim: bool):
     # Retry a transient ASR failure once; never let it bubble up and kill the
     # session. Returns None on hard failure so the caller skips this segment.
-    for attempt in range(2):
-        try:
-            async with ASR_LOCK:
-                return await asyncio.to_thread(ASR.transcribe, pcm, interim)
-        except Exception:
-            if attempt == 1:
-                log.exception("ASR failed, skipping segment")
-                return None
-            await asyncio.sleep(0.2)
+    global _asr_rr
+    async with ASR_SEM:                       # bound in-flight == pool size
+        model = ASR_POOL[_asr_rr % len(ASR_POOL)]
+        _asr_rr += 1
+        loop = asyncio.get_running_loop()
+        for attempt in range(2):
+            try:
+                return await loop.run_in_executor(
+                    ASR_EXEC, model.transcribe, pcm, interim
+                )
+            except Exception:
+                if attempt == 1:
+                    log.exception("ASR failed, skipping segment")
+                    return None
+                await asyncio.sleep(0.2)
 
 
 async def handle(ws):
@@ -145,10 +158,16 @@ async def _handle(ws):
 
 
 async def main():
-    global ASR
-    log.info("loading ASR model '%s' ...", settings.ASR_MODEL)
-    ASR = await asyncio.to_thread(Asr)
-    log.info("ASR ready on device=%s", ASR.device)
+    global ASR_POOL, ASR_SEM, ASR_EXEC
+    n = max(1, settings.ASR_WORKERS)
+    gpus = max(1, settings.ASR_NUM_GPUS)
+    log.info("loading %d ASR replica(s) of '%s' across %d GPU(s) ...",
+             n, settings.ASR_MODEL, gpus)
+    # Load replicas sequentially (each pins to GPU i % gpus).
+    ASR_POOL = [await asyncio.to_thread(Asr, i % gpus) for i in range(n)]
+    ASR_SEM = asyncio.Semaphore(n)
+    ASR_EXEC = concurrent.futures.ThreadPoolExecutor(max_workers=n)
+    log.info("ASR pool ready: %d worker(s) on device=%s", n, ASR_POOL[0].device)
     log.info("LLM endpoint: %s model=%s", settings.LLM_BASE_URL, settings.LLM_MODEL)
 
     async with websockets.serve(
