@@ -66,7 +66,16 @@ class AsrResult:
 
 
 class Asr:
-    def __init__(self, device_index: int = 0):
+    def __init__(self, device_index=None, num_workers: int = 1):
+        """A single WhisperModel, optionally replicated across multiple GPUs.
+
+        The CORRECT multi-GPU pattern (per faster-whisper maintainer) is ONE
+        model with device_index=[list of GPUs] + num_workers, NOT one model per
+        GPU behind a shared thread pool — the latter triggers
+        "CUDA failed with error invalid argument" because a GPU-pinned model can
+        run on a thread bound to a different device. CTranslate2 owns the
+        worker→GPU routing; we just submit concurrent calls.
+        """
         from faster_whisper import WhisperModel
 
         device = settings.ASR_DEVICE
@@ -80,10 +89,9 @@ class Asr:
         if compute == "auto":
             compute = "float16" if device == "cuda" else "int8"
 
-        # Pin this replica to a specific GPU so a pool of workers spreads across
-        # all cards (multi-GPU boxes); ignored on CPU.
-        kwargs = {}
-        if device == "cuda":
+        kwargs = {"num_workers": max(1, num_workers)}
+        if device == "cuda" and device_index is not None:
+            # int OR list of ints; a list = one CTranslate2 worker per GPU.
             kwargs["device_index"] = device_index
 
         self.model = WhisperModel(

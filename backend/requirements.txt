@@ -1,4 +1,5 @@
 websockets>=12.0
 webrtcvad-wheels>=2.0.14
 faster-whisper>=1.1.0
+ctranslate2>=4.0.0      # multi-GPU device_index "invalid argument" fixed >=3.16.1
 openai>=1.40.0

@@ -36,43 +36,62 @@ logging.basicConfig(
 )
 log = logging.getLogger("relay")
 
-# Pool of ASR model replicas for CONCURRENT transcription. The old design used a
-# single model behind one asyncio.Lock, which serialized every user's audio
-# through one lane (fine for 1–2 users, a bottleneck for 20). Now N replicas run
-# in parallel: a Semaphore bounds in-flight work to the pool size, a dedicated
-# thread pool runs the blocking transcribe calls, and we round-robin replicas.
-ASR_POOL: list[Asr] = []
+# Single WhisperModel replicated across GPUs (device_index=[...]) with
+# num_workers internal CTranslate2 workers. CTranslate2 routes each concurrent
+# .transcribe() onto a free worker/GPU; we just submit N concurrent calls from a
+# thread pool and bound concurrency with a semaphore. (One-model-per-GPU behind
+# a shared pool is the pattern that crashed with "CUDA invalid argument".)
+ASR: Asr | None = None
 ASR_SEM: asyncio.Semaphore | None = None
 ASR_EXEC: concurrent.futures.ThreadPoolExecutor | None = None
-_asr_rr = 0
+
+# Lightweight live metrics (for load testing / ops visibility).
+METRICS = {
+    "asr_inflight": 0,     # transcriptions currently running
+    "asr_waiting": 0,      # coroutines blocked on the semaphore
+    "active_connections": 0,
+    "asr_wait_ms_p95": 0.0,
+}
+_wait_samples: list[float] = []
 
 
 async def run_asr(pcm: bytes, interim: bool):
     # Retry a transient ASR failure once; never let it bubble up and kill the
     # session. Returns None on hard failure so the caller skips this segment.
-    global _asr_rr
-    async with ASR_SEM:                       # bound in-flight == pool size
-        model = ASR_POOL[_asr_rr % len(ASR_POOL)]
-        _asr_rr += 1
-        loop = asyncio.get_running_loop()
-        for attempt in range(2):
-            try:
-                return await loop.run_in_executor(
-                    ASR_EXEC, model.transcribe, pcm, interim
-                )
-            except Exception:
-                if attempt == 1:
-                    log.exception("ASR failed, skipping segment")
-                    return None
-                await asyncio.sleep(0.2)
+    METRICS["asr_waiting"] += 1
+    t0 = asyncio.get_running_loop().time()
+    async with ASR_SEM:                       # bound in-flight == worker count
+        wait_ms = (asyncio.get_running_loop().time() - t0) * 1000.0
+        METRICS["asr_waiting"] -= 1
+        METRICS["asr_inflight"] += 1
+        _wait_samples.append(wait_ms)
+        if len(_wait_samples) > 500:
+            del _wait_samples[:len(_wait_samples) - 500]
+        try:
+            loop = asyncio.get_running_loop()
+            for attempt in range(2):
+                try:
+                    return await loop.run_in_executor(
+                        ASR_EXEC, ASR.transcribe, pcm, interim
+                    )
+                except Exception:
+                    if attempt == 1:
+                        log.exception("ASR failed, skipping segment")
+                        return None
+                    await asyncio.sleep(0.2)
+        finally:
+            METRICS["asr_inflight"] -= 1
 
 
 async def handle(ws):
     # Top-level guard: no single client session can ever take down the server.
+    METRICS["active_connections"] += 1
     try:
         await _handle(ws)
     except Exception:
         log.exception("unhandled session error (server stays up)")
+    finally:
+        METRICS["active_connections"] -= 1
 
 
 async def _handle(ws):
@@ -157,19 +176,50 @@ async def _handle(ws):
         log.info("client disconnected: %s", peer)
 
 
+def _metrics_snapshot() -> dict:
+    s = sorted(_wait_samples)
+    p95 = s[int(len(s) * 0.95)] if s else 0.0
+    workers = ASR_SEM._value if ASR_SEM else 0  # remaining; capacity = settings
+    return {**METRICS, "asr_wait_ms_p95": round(p95, 1),
+            "asr_workers": settings.ASR_WORKERS}
+
+
+async def _serve_metrics(port: int = 9000):
+    # Tiny localhost-only HTTP /metrics endpoint for the load test + ops.
+    async def cb(reader, writer):
+        try:
+            await reader.read(1024)  # drain request
+            body = json.dumps(_metrics_snapshot()).encode()
+            writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                         b"Content-Length: " + str(len(body)).encode() +
+                         b"\r\nConnection: close\r\n\r\n" + body)
+            await writer.drain()
+        except Exception:
+            pass
+        finally:
+            writer.close()
+    server = await asyncio.start_server(cb, "127.0.0.1", port)
+    log.info("metrics on http://127.0.0.1:%d/metrics", port)
+    return server
+
+
 async def main():
-    global ASR_POOL, ASR_SEM, ASR_EXEC
+    global ASR, ASR_SEM, ASR_EXEC
     n = max(1, settings.ASR_WORKERS)
     gpus = max(1, settings.ASR_NUM_GPUS)
-    log.info("loading %d ASR replica(s) of '%s' across %d GPU(s) ...",
-             n, settings.ASR_MODEL, gpus)
-    # Load replicas sequentially (each pins to GPU i % gpus).
-    ASR_POOL = [await asyncio.to_thread(Asr, i % gpus) for i in range(n)]
+    # device_index = [0,1,..,gpus-1] (these are CUDA-VISIBLE indices; the relay's
+    # CUDA_VISIBLE_DEVICES already maps them onto the physical whisper GPUs).
+    dev_index = list(range(gpus)) if gpus > 1 else 0
+    log.info("loading 1 ASR model '%s' on device_index=%s with %d workers ...",
+             settings.ASR_MODEL, dev_index, n)
+    ASR = await asyncio.to_thread(Asr, dev_index, n)
     ASR_SEM = asyncio.Semaphore(n)
     ASR_EXEC = concurrent.futures.ThreadPoolExecutor(max_workers=n)
-    log.info("ASR pool ready: %d worker(s) on device=%s", n, ASR_POOL[0].device)
+    log.info("ASR ready: %d workers across %d GPU(s) on device=%s",
+             n, gpus, ASR.device)
     log.info("LLM endpoint: %s model=%s", settings.LLM_BASE_URL, settings.LLM_MODEL)
 
+    await _serve_metrics()
     async with websockets.serve(
         handle, settings.HOST, settings.PORT, max_size=None, ping_interval=20
     ):
