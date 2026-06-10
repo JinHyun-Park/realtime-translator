@@ -61,9 +61,13 @@ final class RelayClient: NSObject, URLSessionWebSocketDelegate {
         setConnected(false)
     }
 
+    // "mic" = my voice (ME), "system" = the remote/Zoom side (THEM). Sent so the
+    // relay can tag broadcasts to read-only viewers.
+    private var streamTag: String { name == "mic" ? "me" : "them" }
+
     func setPair(_ a: String, _ b: String) {
         pair = (a, b)
-        sendJSON(["type": "config", "pair": [a, b]])
+        sendJSON(["type": "config", "pair": [a, b], "stream": streamTag])
     }
 
     func sendAudio(_ data: Data) {
@@ -91,8 +95,8 @@ final class RelayClient: NSObject, URLSessionWebSocketDelegate {
                     if decoded.type == "ready" {
                         self.reconnectDelay = 0.5          // reset backoff
                         self.setConnected(true)
-                        // Re-assert our language pair after a (re)connect.
-                        self.sendJSON(["type": "config", "pair": [self.pair.0, self.pair.1]])
+                        // Re-assert our language pair + stream tag after a (re)connect.
+                        self.sendJSON(["type": "config", "pair": [self.pair.0, self.pair.1], "stream": self.streamTag])
                     }
                     DispatchQueue.main.async { self.onMessage?(decoded) }
                 }

@@ -83,15 +83,62 @@ async def run_asr(pcm: bytes, interim: bool):
             METRICS["asr_inflight"] -= 1
 
 
+# Read-only viewers (browsers). Every capture connection's interim/final JSON is
+# fanned out to all of these. Broadcast mode: one app captures Zoom system audio,
+# the relay transcribes/translates ONCE, and many browsers watch the subtitles.
+VIEWERS: set = set()
+
+
+async def broadcast(payload: dict):
+    # Fan one interim/final payload out to all viewers; drop dead sockets.
+    if not VIEWERS:
+        return
+    data = json.dumps(payload)
+    dead = []
+    for v in VIEWERS:
+        try:
+            await v.send(data)
+        except Exception:
+            dead.append(v)
+    for v in dead:
+        VIEWERS.discard(v)
+
+
+def _is_viewer(ws) -> bool:
+    # CloudFront forwards the path; viewers connect to /viewsock (capture uses /).
+    path = (getattr(getattr(ws, "request", None), "path", None)
+            or getattr(ws, "path", "") or "")
+    return path.rstrip("/").endswith("/viewsock") or "role=viewer" in path
+
+
 async def handle(ws):
     # Top-level guard: no single client session can ever take down the server.
     METRICS["active_connections"] += 1
     try:
-        await _handle(ws)
+        if _is_viewer(ws):
+            await _handle_viewer(ws)
+        else:
+            await _handle(ws)
     except Exception:
         log.exception("unhandled session error (server stays up)")
     finally:
         METRICS["active_connections"] -= 1
+
+
+async def _handle_viewer(ws):
+    # Read-only subscriber: receives broadcasts, sends nothing meaningful.
+    peer = getattr(ws, "remote_address", "?")
+    VIEWERS.add(ws)
+    log.info("viewer connected: %s (viewers=%d)", peer, len(VIEWERS))
+    try:
+        await ws.send(json.dumps({"type": "ready", "role": "viewer"}))
+        async for _ in ws:      # ignore anything a viewer sends; keepalive read
+            pass
+    except websockets.ConnectionClosed:
+        pass
+    finally:
+        VIEWERS.discard(ws)
+        log.info("viewer disconnected: %s (viewers=%d)", peer, len(VIEWERS))
 
 
 async def _handle(ws):
@@ -100,6 +147,7 @@ async def _handle(ws):
     seg = Segmenter()
     tr = Translator()
     pair: tuple[str, str] = ("ko", "ja")
+    stream: str | None = None     # "me" | "them" — set via config, tags broadcasts
     # Drop stale interim work if a newer one for the same seq arrives.
     interim_tasks: dict[int, asyncio.Task] = {}
 
@@ -113,14 +161,17 @@ async def _handle(ws):
             translation, tgt = await tr.translate(
                 res.text, res.language, pair, final=is_final
             )
-            await ws.send(json.dumps({
+            payload = {
                 "type": "final" if is_final else "interim",
                 "seq": ev.seq,
                 "src": res.language,
                 "tgt": tgt,
                 "source": res.text,
                 "translation": translation,
-            }))
+                "stream": stream,
+            }
+            await ws.send(json.dumps(payload))   # to the capture client (app UI)
+            await broadcast(payload)             # to all read-only viewers
         except Exception as e:  # noqa
             log.exception("process error")
             try:
@@ -158,6 +209,9 @@ async def _handle(ws):
                         if isinstance(p, list) and len(p) == 2:
                             pair = (p[0], p[1])
                             log.info("pair set to %s", pair)
+                        s = msg.get("stream")
+                        if s in ("me", "them"):
+                            stream = s
                     elif msg.get("type") == "end":
                         await dispatch(seg.flush())
             except websockets.ConnectionClosed:
@@ -179,27 +233,47 @@ async def _handle(ws):
 def _metrics_snapshot() -> dict:
     s = sorted(_wait_samples)
     p95 = s[int(len(s) * 0.95)] if s else 0.0
-    workers = ASR_SEM._value if ASR_SEM else 0  # remaining; capacity = settings
     return {**METRICS, "asr_wait_ms_p95": round(p95, 1),
-            "asr_workers": settings.ASR_WORKERS}
+            "asr_workers": settings.ASR_WORKERS, "viewers": len(VIEWERS)}
 
 
-async def _serve_metrics(port: int = 9000):
-    # Tiny localhost-only HTTP /metrics endpoint for the load test + ops.
+def _load_viewer_html() -> bytes:
+    import pathlib
+    p = pathlib.Path(__file__).parent / "viewer.html"
+    try:
+        return p.read_bytes()
+    except Exception:
+        return b"<!doctype html><h1>viewer.html missing</h1>"
+
+
+_VIEWER_HTML = _load_viewer_html()
+
+
+async def _serve_http(port: int = 9000):
+    # HTTP server: serves the viewer page (GET /view) AND metrics JSON (/metrics).
+    # Bound to 0.0.0.0 so CloudFront can fetch the viewer page; lock :9000 to the
+    # CloudFront origin-facing prefix list at the SG layer (per no-public rule).
     async def cb(reader, writer):
         try:
-            await reader.read(1024)  # drain request
-            body = json.dumps(_metrics_snapshot()).encode()
-            writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
-                         b"Content-Length: " + str(len(body)).encode() +
-                         b"\r\nConnection: close\r\n\r\n" + body)
+            req = await reader.read(2048)
+            first = req.split(b"\r\n", 1)[0]
+            path = first.split(b" ")[1] if b" " in first else b"/"
+            path = path.split(b"?", 1)[0]
+            if path in (b"/view", b"/view/", b"/viewer.html", b"/"):
+                body, ctype = _VIEWER_HTML, b"text/html; charset=utf-8"
+            else:  # /metrics or anything else
+                body = json.dumps(_metrics_snapshot()).encode()
+                ctype = b"application/json"
+            writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: " + ctype +
+                         b"\r\nContent-Length: " + str(len(body)).encode() +
+                         b"\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n" + body)
             await writer.drain()
         except Exception:
             pass
         finally:
             writer.close()
-    server = await asyncio.start_server(cb, "127.0.0.1", port)
-    log.info("metrics on http://127.0.0.1:%d/metrics", port)
+    server = await asyncio.start_server(cb, "0.0.0.0", port)
+    log.info("http (viewer + metrics) on http://0.0.0.0:%d", port)
     return server
 
 
@@ -219,7 +293,7 @@ async def main():
              n, gpus, ASR.device)
     log.info("LLM endpoint: %s model=%s", settings.LLM_BASE_URL, settings.LLM_MODEL)
 
-    await _serve_metrics()
+    await _serve_http()
     async with websockets.serve(
         handle, settings.HOST, settings.PORT, max_size=None, ping_interval=20
     ):
