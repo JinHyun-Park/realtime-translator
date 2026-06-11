@@ -22,6 +22,56 @@ func rtlog(_ s: String) {
     }
 }
 
+/// Persists every finalized translation line to disk THE MOMENT it arrives, so
+/// nothing is lost if the app is quit/killed/crashes (no need to press Export).
+/// Files live under ~/Documents/RealtimeTranslator/, one per session, named by
+/// start time. Append-only; each write is flushed immediately.
+final class TranscriptAutoSaver {
+    private let url: URL
+    private let q = DispatchQueue(label: "rt.autosave")
+    private var started = false
+
+    /// The folder that holds all autosaved transcripts.
+    static var folder: URL {
+        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        return docs.appendingPathComponent("RealtimeTranslator", isDirectory: true)
+    }
+
+    init(startedAt: Date) {
+        let fmt = DateFormatter()
+        fmt.dateFormat = "yyyy-MM-dd_HHmmss"
+        let name = "transcript-\(fmt.string(from: startedAt)).md"
+        url = TranscriptAutoSaver.folder.appendingPathComponent(name)
+    }
+
+    var fileURL: URL { url }
+
+    private func ensureFile() {
+        guard !started else { return }
+        started = true
+        try? FileManager.default.createDirectory(
+            at: TranscriptAutoSaver.folder, withIntermediateDirectories: true)
+        let header = "# Translation transcript\n\n_started \(Date())_\n\n"
+        try? header.data(using: .utf8)?.write(to: url)
+    }
+
+    /// Append one finalized line. Called on the main actor; does file IO on a
+    /// background queue so the UI never blocks.
+    func append(stream: String, src: String, tgt: String, source: String, translation: String) {
+        let who = stream == "mic" ? "🎙 Me" : "🔊 Them"
+        let block = "- **\(who) · \(src.uppercased())** \(source)\n"
+            + "  - **\(tgt.uppercased())** \(translation)\n"
+        q.async { [weak self] in
+            guard let self else { return }
+            self.ensureFile()
+            guard let data = block.data(using: .utf8) else { return }
+            if let fh = try? FileHandle(forWritingTo: self.url) {
+                fh.seekToEndOfFile(); fh.write(data); try? fh.close()
+            }
+        }
+    }
+}
+
 /// Tiny thread-safe counter for audio-flow diagnostics, written from background
 /// audio callbacks and read from the UI timer. A plain lock keeps it race-free.
 final class FlowCounter: @unchecked Sendable {
@@ -75,6 +125,9 @@ final class AppModel: ObservableObject {
     // Two independent in-progress slots — mic and system can both be mid-sentence.
     @Published var micInterim: Line?
     @Published var sysInterim: Line?
+    // Auto-saves every final line to disk so nothing is lost on quit/crash.
+    private var autoSaver: TranscriptAutoSaver?
+    @Published var autosavePath: String = ""
 
     // Live audio-flow indicator shown in the UI (so we don't depend on console logs).
     @Published var flowInfo = ""
@@ -139,6 +192,12 @@ final class AppModel: ObservableObject {
         epoch += 1
         micInterim = nil; sysInterim = nil
         micFlow.reset(); sysFlow.reset()
+
+        // New autosave file per Start — every final line is written to disk
+        // immediately, so a quit/crash never loses the transcript.
+        let saver = TranscriptAutoSaver(startedAt: Date())
+        autoSaver = saver
+        autosavePath = saver.fileURL.path
 
         // mic = my side (my language first); system = the remote side (their
         // language first). Flipping the pair makes each stream translate toward
@@ -281,10 +340,16 @@ final class AppModel: ObservableObject {
                 src: msg.src ?? "", tgt: msg.tgt ?? "",
                 isFinal: true
             )
+            let isNew = !lines.contains(where: { $0.id == uid })
             if let idx = lines.firstIndex(where: { $0.id == uid }) {
                 lines[idx] = line
             } else {
                 lines.append(line)
+            }
+            // Persist each NEW final to disk immediately (crash/quit-proof).
+            if isNew, !line.translation.isEmpty {
+                autoSaver?.append(stream: stream, src: line.src, tgt: line.tgt,
+                                  source: line.source, translation: line.translation)
             }
             if stream == "mic", micInterim?.id == uid { micInterim = nil }
             if stream == "system", sysInterim?.id == uid { sysInterim = nil }
@@ -296,10 +361,18 @@ final class AppModel: ObservableObject {
     // MARK: - Transcript actions
 
     /// Explicitly clear the accumulated transcript (the only way to wipe it —
-    /// start/stop preserves it).
+    /// start/stop preserves it). Note: does NOT delete autosaved files on disk.
     func clearTranscript() {
         lines.removeAll()
         micInterim = nil; sysInterim = nil
+    }
+
+    /// Reveal the auto-saved transcripts folder in Finder.
+    func revealAutosaveFolder() {
+        let folder = TranscriptAutoSaver.folder
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        NSWorkspace.shared.activateFileViewerSelecting(
+            autosavePath.isEmpty ? [folder] : [URL(fileURLWithPath: autosavePath)])
     }
 
     /// Render the full transcript as Markdown, labeled by speaker.

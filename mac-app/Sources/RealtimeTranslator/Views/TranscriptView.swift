@@ -13,6 +13,12 @@ struct TranscriptView: View {
                 Spacer()
                 Toggle("Show original", isOn: $showSource)
                     .toggleStyle(.switch).controlSize(.mini)
+                // Auto-saved to disk live; this just reveals the folder.
+                Button { model.revealAutosaveFolder() } label: {
+                    Label("저장폴더", systemImage: "folder")
+                }
+                .controlSize(.small)
+                .help("자막은 자동 저장됩니다. 폴더 열기")
                 Button { model.exportMarkdown() } label: {
                     Label("Export .md", systemImage: "square.and.arrow.down")
                 }
