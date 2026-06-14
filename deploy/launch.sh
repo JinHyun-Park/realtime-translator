@@ -9,12 +9,24 @@ cd "$(dirname "$0")/.."
 REGION=ap-northeast-1
 ACCT=$(aws sts get-caller-identity --query Account --output text)
 BUCKET=rt-translator-deploy-$ACCT-$REGION
-AMI=$(aws ssm get-parameters --region $REGION \
-  --names /aws/service/deeplearning/ami/x86_64/oss-nvidia-driver-gpu-pytorch-2.7-ubuntu-22.04/latest/ami-id \
-  --query 'Parameters[0].Value' --output text)
 INSTANCE_TYPE="${INSTANCE_TYPE:-g6e.2xlarge}"
 ROLE=rt-translator-ec2-role
 PROFILE=rt-translator-ec2-profile
+
+# Prefer the golden AMI (models + vLLM/starlette pinned + driver pre-baked) for
+# a seconds-not-minutes boot. Falls back to the DLAMI + full bootstrap if no
+# golden AMI is recorded. Override with GOLDEN_AMI= or FORCE_DLAMI=1.
+GOLDEN_AMI="${GOLDEN_AMI:-$(cat deploy/.golden-ami 2>/dev/null || true)}"
+if [ -n "$GOLDEN_AMI" ] && [ "${FORCE_DLAMI:-0}" != "1" ]; then
+  AMI="$GOLDEN_AMI"; USERDATA=deploy/userdata-golden.sh
+  echo "==> using GOLDEN AMI $AMI (fast boot)"
+else
+  AMI=$(aws ssm get-parameters --region $REGION \
+    --names /aws/service/deeplearning/ami/x86_64/oss-nvidia-driver-gpu-pytorch-2.7-ubuntu-22.04/latest/ami-id \
+    --query 'Parameters[0].Value' --output text)
+  USERDATA=deploy/userdata.sh
+  echo "==> using DLAMI $AMI (full bootstrap, ~20min)"
+fi
 
 echo "==> account=$ACCT region=$REGION ami=$AMI type=$INSTANCE_TYPE"
 
@@ -64,7 +76,7 @@ SUBNET=$(aws ec2 describe-subnets --region $REGION \
 # requires ?token=... ; empty file => open relay (dev).
 RELAY_TOKEN="$(cat deploy/.relay-token 2>/dev/null || true)"
 sed -e "s|__BUCKET__|$BUCKET|g" -e "s|__REGION__|$REGION|g" \
-    -e "s|__RELAY_TOKEN__|$RELAY_TOKEN|g" deploy/userdata.sh > /tmp/rt-userdata.sh
+    -e "s|__RELAY_TOKEN__|$RELAY_TOKEN|g" "$USERDATA" > /tmp/rt-userdata.sh
 
 IID=$(aws ec2 run-instances --region $REGION \
   --image-id $AMI --instance-type $INSTANCE_TYPE \

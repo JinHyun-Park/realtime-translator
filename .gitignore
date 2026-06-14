@@ -22,3 +22,4 @@ deploy/.cloudfront-id
 .DS_Store
 deploy/.relay-token
 deploy/.instance-id.big
+deploy/.golden-ami
