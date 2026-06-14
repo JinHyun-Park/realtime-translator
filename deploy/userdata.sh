@@ -39,7 +39,10 @@ PY=/usr/bin/python3
 $PY -m pip install -U pip wheel
 $PY -m pip install -r requirements.txt
 # Qwen3-32B-AWQ needs vLLM >= 0.8.5.
-$PY -m pip install "vllm>=0.8.5"
+# Pin to a known-good version: vllm 0.23.0 shipped a Starlette-incompat bug
+# ('_IncludedRouter' has no attribute 'path' -> HTTP 500 on every request).
+# 0.22.1 is verified working with Qwen3-32B-AWQ.
+$PY -m pip install "vllm==0.22.1"
 echo "PIPDONE" > $STATUS
 
 # --- GPU topology: decide how to split vLLM vs whisper across cards ----------
@@ -51,12 +54,14 @@ if [ "$NGPU" -ge 2 ]; then
   ASR_GPUS=$((NGPU - 1))          # whisper uses all cards except GPU0
   ASR_WORKERS=$((ASR_GPUS * 2))   # ~2 replicas/card
   ASR_CUDA="$(seq -s, 1 $((NGPU-1)))"   # e.g. "1,2,3"
+  VLLM_GPU_UTIL=0.90              # vLLM has GPU0 to itself
 else
   ASR_GPUS=1
   ASR_WORKERS=3                   # share the single card with vLLM
   ASR_CUDA="0"
+  VLLM_GPU_UTIL=0.78             # leave room for whisper workers on the SAME GPU
 fi
-echo "GPU_TOPOLOGY ngpu=$NGPU asr_workers=$ASR_WORKERS asr_gpus=$ASR_GPUS cuda=$ASR_CUDA" >> /var/log/rt-bootstrap.log
+echo "GPU_TOPOLOGY ngpu=$NGPU asr_workers=$ASR_WORKERS asr_gpus=$ASR_GPUS cuda=$ASR_CUDA vllm_util=$VLLM_GPU_UTIL" >> /var/log/rt-bootstrap.log
 
 # --- 3. systemd: vLLM (Qwen3-32B AWQ) -------------------------------------
 cat >/etc/systemd/system/rt-vllm.service <<UNIT
@@ -73,7 +78,7 @@ Environment=CUDA_VISIBLE_DEVICES=0
 ExecStart=/usr/bin/python3 -m vllm.entrypoints.openai.api_server \
   --model Qwen/Qwen3-32B-AWQ \
   --host 127.0.0.1 --port 8000 \
-  --max-model-len 8192 --gpu-memory-utilization 0.90 \
+  --max-model-len 8192 --gpu-memory-utilization $VLLM_GPU_UTIL \
   --served-model-name Qwen/Qwen3-32B-AWQ
 Restart=always
 RestartSec=10
