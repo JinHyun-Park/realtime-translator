@@ -51,8 +51,20 @@ METRICS = {
     "asr_waiting": 0,      # coroutines blocked on the semaphore
     "active_connections": 0,
     "asr_wait_ms_p95": 0.0,
+    # --- reliability counters (the "silent failures" we couldn't see before) ---
+    "finals_total": 0,     # finalized utterances that produced a translation
+    "finals_dropped": 0,   # finals that yielded NO usable translation (lost!)
+    "asr_errors": 0,       # ASR calls that failed after retry
+    "llm_errors": 0,       # translation calls that failed after retry
+    "e2e_ms_p95": 0.0,     # final-translation end-to-end latency p95
+    "uptime_s": 0,
+    "vllm_up": False,      # is the translation backend actually answering?
+    "vllm_consecutive_fail": 0,
 }
 _wait_samples: list[float] = []
+_e2e_samples: list[float] = []   # end-to-end latency (ms) of finals
+import time as _time
+_START_TS = _time.time()
 
 
 async def run_asr(pcm: bytes, interim: bool):
@@ -76,6 +88,7 @@ async def run_asr(pcm: bytes, interim: bool):
                     )
                 except Exception:
                     if attempt == 1:
+                        METRICS["asr_errors"] += 1
                         log.exception("ASR failed, skipping segment")
                         return None
                     await asyncio.sleep(0.2)
@@ -189,13 +202,32 @@ async def _handle(ws):
     await ws.send(json.dumps({"type": "ready"}))
 
     async def process(ev, is_final: bool):
+        t0 = _time.time()
         try:
             res = await run_asr(ev.pcm, interim=not is_final)
             if res is None or not res.text.strip():
+                # A final that produced no transcription = a lost sentence.
+                if is_final:
+                    METRICS["finals_dropped"] += 1
+                    log.warning("final dropped (no ASR text) seq=%s stream=%s",
+                                ev.seq, stream)
                 return
             translation, tgt = await tr.translate(
                 res.text, res.language, pair, final=is_final
             )
+            if is_final:
+                if translation.strip():
+                    METRICS["finals_total"] += 1
+                    # end-to-end latency: process start -> ready to send
+                    dt = (_time.time() - t0) * 1000.0
+                    _e2e_samples.append(dt)
+                    if len(_e2e_samples) > 500:
+                        del _e2e_samples[:len(_e2e_samples) - 500]
+                else:
+                    # ASR gave text but translation came back empty = lost.
+                    METRICS["finals_dropped"] += 1
+                    log.warning("final dropped (empty translation) seq=%s src='%s'",
+                                ev.seq, res.text[:40])
             payload = {
                 "type": "final" if is_final else "interim",
                 "seq": ev.seq,
@@ -208,6 +240,8 @@ async def _handle(ws):
             await ws.send(json.dumps(payload))   # to the capture client (app UI)
             await broadcast(payload)             # to all read-only viewers
         except Exception as e:  # noqa
+            if is_final:
+                METRICS["finals_dropped"] += 1
             log.exception("process error")
             try:
                 await ws.send(json.dumps({"type": "error", "message": str(e)}))
@@ -266,10 +300,20 @@ async def _handle(ws):
 
 
 def _metrics_snapshot() -> dict:
-    s = sorted(_wait_samples)
-    p95 = s[int(len(s) * 0.95)] if s else 0.0
-    return {**METRICS, "asr_wait_ms_p95": round(p95, 1),
-            "asr_workers": settings.ASR_WORKERS, "viewers": len(VIEWERS)}
+    def _p95(xs):
+        s = sorted(xs)
+        return round(s[int(len(s) * 0.95)], 1) if s else 0.0
+    finals = METRICS["finals_total"]
+    dropped = METRICS["finals_dropped"]
+    drop_rate = round(dropped / (finals + dropped), 4) if (finals + dropped) else 0.0
+    return {**METRICS,
+            "asr_wait_ms_p95": _p95(_wait_samples),
+            "e2e_ms_p95": _p95(_e2e_samples),
+            "finals_drop_rate": drop_rate,      # the headline reliability number
+            "llm_errors": Translator.llm_errors,
+            "uptime_s": int(_time.time() - _START_TS),
+            "asr_workers": settings.ASR_WORKERS,
+            "viewers": len(VIEWERS)}
 
 
 def _load_viewer_html() -> bytes:
@@ -312,6 +356,39 @@ async def _serve_http(port: int = 9000):
     return server
 
 
+async def _vllm_health_loop():
+    # Actively probe the translation backend. The dangerous failure mode is
+    # "relay up, vLLM dead" — connections succeed but every translation drops
+    # silently. We surface vllm_up in /metrics and, after sustained failure,
+    # LOUDLY restart the rt-vllm service (best-effort; harmless if not systemd).
+    import urllib.request
+    base = settings.LLM_BASE_URL.rstrip("/")
+    url = base[:-3] + "/v1/models" if base.endswith("/v1") else base + "/v1/models"
+    while True:
+        ok = False
+        try:
+            ok = await asyncio.to_thread(
+                lambda: urllib.request.urlopen(url, timeout=4).status == 200)
+        except Exception:
+            ok = False
+        METRICS["vllm_up"] = ok
+        if ok:
+            METRICS["vllm_consecutive_fail"] = 0
+        else:
+            METRICS["vllm_consecutive_fail"] += 1
+            f = METRICS["vllm_consecutive_fail"]
+            log.error("vLLM health check FAILED (consecutive=%d) at %s", f, url)
+            # ~6 consecutive failures (~60s) => attempt a loud auto-recovery.
+            if f == 6:
+                log.error("vLLM down ~60s — restarting rt-vllm.service")
+                try:
+                    await asyncio.create_subprocess_exec(
+                        "systemctl", "restart", "rt-vllm.service")
+                except Exception:
+                    log.exception("could not restart rt-vllm (not systemd?)")
+        await asyncio.sleep(10)
+
+
 async def main():
     global ASR, ASR_SEM, ASR_EXEC
     n = max(1, settings.ASR_WORKERS)
@@ -329,6 +406,7 @@ async def main():
     log.info("LLM endpoint: %s model=%s", settings.LLM_BASE_URL, settings.LLM_MODEL)
 
     await _serve_http()
+    asyncio.create_task(_vllm_health_loop())   # active backend watchdog
     async with websockets.serve(
         handle, settings.HOST, settings.PORT, max_size=None, ping_interval=20
     ):

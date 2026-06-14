@@ -34,6 +34,10 @@ def _target_for(src: str, prefer_pair: tuple[str, str]) -> str:
 
 
 class Translator:
+    # Process-wide count of translations that failed after all retries (a lost
+    # final). Read by the server's /metrics snapshot for observability.
+    llm_errors: int = 0
+
     def __init__(self):
         self.client = AsyncOpenAI(
             base_url=settings.LLM_BASE_URL, api_key=settings.LLM_API_KEY
@@ -100,6 +104,7 @@ class Translator:
                 break
             except Exception:
                 if i == attempts - 1:
+                    Translator.llm_errors += 1   # observability: lost translation
                     return "", tgt
                 await asyncio.sleep(0.4 * (i + 1))
 
