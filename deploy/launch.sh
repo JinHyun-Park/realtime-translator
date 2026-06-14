@@ -60,7 +60,11 @@ SUBNET=$(aws ec2 describe-subnets --region $REGION \
   --query 'Subnets[0].SubnetId' --output text)
 
 # --- user-data ---
-sed -e "s|__BUCKET__|$BUCKET|g" -e "s|__REGION__|$REGION|g" deploy/userdata.sh > /tmp/rt-userdata.sh
+# Access token: read deploy/.relay-token (created out-of-band) so the relay
+# requires ?token=... ; empty file => open relay (dev).
+RELAY_TOKEN="$(cat deploy/.relay-token 2>/dev/null || true)"
+sed -e "s|__BUCKET__|$BUCKET|g" -e "s|__REGION__|$REGION|g" \
+    -e "s|__RELAY_TOKEN__|$RELAY_TOKEN|g" deploy/userdata.sh > /tmp/rt-userdata.sh
 
 IID=$(aws ec2 run-instances --region $REGION \
   --image-id $AMI --instance-type $INSTANCE_TYPE \

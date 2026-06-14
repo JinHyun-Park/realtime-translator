@@ -31,6 +31,9 @@ struct ControlPanel: View {
                         TextField("ws://host:8765", text: $model.serverURL)
                             .textFieldStyle(.roundedBorder)
                             .disabled(model.running)
+                        SecureField("접속 비밀번호 / access password", text: $model.accessKey)
+                            .textFieldStyle(.roundedBorder)
+                            .disabled(model.running)
                         HStack {
                             Circle()
                                 .fill(model.connected ? .green : .secondary)

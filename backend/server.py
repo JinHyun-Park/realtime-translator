@@ -104,17 +104,52 @@ async def broadcast(payload: dict):
         VIEWERS.discard(v)
 
 
+def _ws_path(ws) -> str:
+    return (getattr(getattr(ws, "request", None), "path", None)
+            or getattr(ws, "path", "") or "")
+
+
 def _is_viewer(ws) -> bool:
     # CloudFront forwards the path; viewers connect to /viewsock (capture uses /).
-    path = (getattr(getattr(ws, "request", None), "path", None)
-            or getattr(ws, "path", "") or "")
-    return path.rstrip("/").endswith("/viewsock") or "role=viewer" in path
+    path = _ws_path(ws).split("?", 1)[0]
+    return path.rstrip("/").endswith("/viewsock") or "role=viewer" in _ws_path(ws)
+
+
+def _authorized(ws) -> bool:
+    # Simple shared-token gate. Open if RELAY_TOKEN unset (dev). Token may come
+    # as ?token=... on the WS URL (browsers can't set WS headers) or as
+    # Authorization: Bearer <token> (native app).
+    if not settings.RELAY_TOKEN:
+        return True
+    import secrets as _secrets
+    from urllib.parse import urlparse, parse_qs
+    # 1) query param
+    try:
+        q = parse_qs(urlparse(_ws_path(ws)).query)
+        tok = (q.get("token") or [""])[0]
+        if tok and _secrets.compare_digest(tok, settings.RELAY_TOKEN):
+            return True
+    except Exception:
+        pass
+    # 2) Authorization header
+    try:
+        hdr = ws.request.headers.get("Authorization", "")
+        if hdr.startswith("Bearer ") and _secrets.compare_digest(hdr[7:], settings.RELAY_TOKEN):
+            return True
+    except Exception:
+        pass
+    return False
 
 
 async def handle(ws):
     # Top-level guard: no single client session can ever take down the server.
     METRICS["active_connections"] += 1
     try:
+        if not _authorized(ws):
+            log.warning("unauthorized connection rejected: %s",
+                        getattr(ws, "remote_address", "?"))
+            await ws.close(code=4401, reason="unauthorized")
+            return
         if _is_viewer(ws):
             await _handle_viewer(ws)
         else:

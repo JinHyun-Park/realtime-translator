@@ -20,3 +20,5 @@ deploy/.cloudfront-id
 
 # OS
 .DS_Store
+deploy/.relay-token
+deploy/.instance-id.big

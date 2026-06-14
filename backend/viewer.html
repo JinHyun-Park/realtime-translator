@@ -37,9 +37,22 @@
   var statusEl = document.getElementById("status");
   var dotEl = document.getElementById("dot");
   var emptyEl = document.getElementById("empty");
+  // Access password: from ?key=... in the URL, or saved, or prompt once.
+  function getKey() {
+    var u = new URLSearchParams(location.search).get("key");
+    if (u) { try { localStorage.setItem("rtKey", u); } catch(e){} return u; }
+    var saved = null; try { saved = localStorage.getItem("rtKey"); } catch(e){}
+    if (saved) return saved;
+    var k = window.prompt("접속 비밀번호 / Access password:") || "";
+    try { localStorage.setItem("rtKey", k); } catch(e){}
+    return k;
+  }
+  var rtKey = getKey();
   // Same host as the page; CloudFront routes /viewsock to the relay WS.
-  var wsURL = (location.protocol === "https:" ? "wss://" : "ws://")
-    + location.host + "/viewsock";
+  function buildURL() {
+    return (location.protocol === "https:" ? "wss://" : "ws://")
+      + location.host + "/viewsock?token=" + encodeURIComponent(rtKey);
+  }
   var interimNodes = {};   // (stream:seq) -> node, for in-place interim updates
   var ws, backoff = 500;
 
@@ -81,7 +94,7 @@
   }
 
   function connect() {
-    ws = new WebSocket(wsURL);
+    ws = new WebSocket(buildURL());
     ws.onopen = function () {
       setStatus("실시간 / live", "live");
       backoff = 500;
@@ -92,7 +105,15 @@
       if (m.type === "final") render(m, true);
       else if (m.type === "interim") render(m, false);
     };
-    ws.onclose = function () {
+    ws.onclose = function (ev) {
+      // 4401 = wrong/missing password: clear it and re-prompt instead of looping.
+      if (ev && ev.code === 4401) {
+        try { localStorage.removeItem("rtKey"); } catch(e){}
+        setStatus("비밀번호 오류 / wrong password", "off");
+        rtKey = getKey();
+        setTimeout(connect, 300);
+        return;
+      }
       setStatus("재연결 중… / reconnecting…", "off");
       setTimeout(connect, backoff);
       backoff = Math.min(backoff * 2, 8000);

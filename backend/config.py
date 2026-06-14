@@ -28,6 +28,12 @@ class Settings:
     HOST = _s("RT_HOST", "0.0.0.0")
     PORT = _i("RT_PORT", 8765)
 
+    # --- Access control (simple shared password/token) ---
+    # If set, every connection (capture AND viewer) must present this token via
+    # ?token=... on the WS URL (or Authorization: Bearer). Empty = open (dev).
+    # Set RT_RELAY_TOKEN in the systemd unit to lock the relay down to you only.
+    RELAY_TOKEN = _s("RT_RELAY_TOKEN", "")
+
     # --- Audio (must match what the Mac app sends) ---
     SAMPLE_RATE = _i("RT_SAMPLE_RATE", 16000)   # Hz, mono PCM16 LE
     FRAME_MS = _i("RT_FRAME_MS", 30)            # webrtcvad accepts 10/20/30

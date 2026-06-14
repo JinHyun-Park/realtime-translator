@@ -105,6 +105,7 @@ Environment=RT_MIN_SILENCE_MS=1000
 Environment=RT_MAX_SEGMENT_MS=15000
 Environment=RT_HOST=0.0.0.0
 Environment=RT_PORT=8765
+Environment=RT_RELAY_TOKEN=__RELAY_TOKEN__
 Environment=HF_HOME=/opt/hf-cache
 ExecStart=/usr/bin/python3 server.py
 Restart=always

@@ -104,6 +104,11 @@ final class AppModel: ObservableObject {
     // Team deployment: CloudFront edge (wss). For local dev via SSM tunnel use
     // ws://localhost:18765. Editable at runtime in the server field.
     @Published var serverURL = "wss://dv7fu8km0bcfp.cloudfront.net"
+    // Access password (shared token). Appended as ?token=... on connect.
+    // Persisted so the user types it once.
+    @Published var accessKey: String = UserDefaults.standard.string(forKey: "accessKey") ?? "" {
+        didSet { UserDefaults.standard.set(accessKey, forKey: "accessKey") }
+    }
     @Published var connected = false
     @Published var running = false
     @Published var status = "Idle"
@@ -185,7 +190,14 @@ final class AppModel: ObservableObject {
 
     func start() {
         rtlog("start() called; url=\(serverURL) micOn=\(captureMic) sysOn=\(captureSystemAudio) inputID=\(String(describing: selectedInputID)) screenPreflight=\(CGPreflightScreenCaptureAccess()) pid=\(ProcessInfo.processInfo.processIdentifier)")
-        guard let url = URL(string: serverURL) else {
+        // Append the access token as a query param (the relay validates it).
+        var comp = URLComponents(string: serverURL)
+        if !accessKey.isEmpty {
+            var q = comp?.queryItems ?? []
+            q.append(URLQueryItem(name: "token", value: accessKey))
+            comp?.queryItems = q
+        }
+        guard let url = comp?.url else {
             status = "Bad server URL"; return
         }
         // Keep prior transcript — a new session continues appending below it.
