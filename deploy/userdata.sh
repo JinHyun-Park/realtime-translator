@@ -39,10 +39,11 @@ PY=/usr/bin/python3
 $PY -m pip install -U pip wheel
 $PY -m pip install -r requirements.txt
 # Qwen3-32B-AWQ needs vLLM >= 0.8.5.
-# Pin to a known-good version: vllm 0.23.0 shipped a Starlette-incompat bug
-# ('_IncludedRouter' has no attribute 'path' -> HTTP 500 on every request).
-# 0.22.1 is verified working with Qwen3-32B-AWQ.
+# Pin the verified-working combo. vllm 0.23.0 + starlette 1.3.1 throw
+# "'_IncludedRouter' object has no attribute 'path'" -> HTTP 500 on every
+# request. Pin vLLM AND its web stack to what works with Qwen3-32B-AWQ.
 $PY -m pip install "vllm==0.22.1"
+$PY -m pip install "starlette==1.2.1" "fastapi==0.136.3"
 echo "PIPDONE" > $STATUS
 
 # --- GPU topology: decide how to split vLLM vs whisper across cards ----------
