@@ -15,13 +15,32 @@ BUCKET="__BUCKET__"
 REGION="__REGION__"
 RELAY_TOKEN="__RELAY_TOKEN__"
 
-# --- 0. nvidia driver vs running kernel (same guard as full bootstrap) -------
-if ! lsmod | grep -q nvidia; then
+# --- 0. nvidia driver vs running kernel --------------------------------------
+# THE golden-AMI boot bug: a baked image carries an nvidia module built for the
+# kernel that was running at bake time. If apt upgraded the kernel between bake
+# and this boot, `lsmod | grep nvidia` can still be TRUE (a stale module loads)
+# yet `nvidia-smi` fails with "NO-MODULE" / no CUDA-capable device. So the gate
+# must be "can nvidia-smi actually enumerate a GPU", not "is a module loaded".
+#
+# Fix = (a) pin the kernel so it can't drift again across reboots, then (b) if
+# nvidia-smi can't see a GPU, rebuild DKMS for the *running* kernel and reload.
+apt-mark hold linux-image-aws linux-headers-aws linux-aws \
+  "linux-image-$(uname -r)" "linux-headers-$(uname -r)" >/dev/null 2>&1 || true
+
+if ! nvidia-smi -L >/dev/null 2>&1; then
+  echo "GPU not visible (likely kernel/DKMS drift) — rebuilding for $(uname -r)"
   apt-get install -y -q "linux-headers-$(uname -r)" >/dev/null 2>&1 || true
+  # Drop any stale module bound to the wrong kernel, then force a rebuild+install
+  # of the DKMS nvidia module against the kernel we are ACTUALLY running.
+  rmmod nvidia_uvm nvidia_drm nvidia_modeset nvidia 2>/dev/null || true
   dkms autoinstall -k "$(uname -r)" >/dev/null 2>&1 || true
   modprobe nvidia 2>/dev/null || true
 fi
-nvidia-smi -L 2>&1 | head -4 || echo "WARN: GPU not visible"
+if nvidia-smi -L 2>&1 | head -4; then
+  echo "GPU OK"
+else
+  echo "WARN: GPU still not visible after DKMS rebuild"
+fi
 
 # --- 1. refresh backend code from S3 (the only thing newer than the image) ---
 aws s3 cp "s3://$BUCKET/rt-backend.tgz" /tmp/rt-backend.tgz --region "$REGION"

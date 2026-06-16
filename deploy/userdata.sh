@@ -16,9 +16,12 @@ REGION="__REGION__"
 # --- 0. ensure NVIDIA driver matches the RUNNING kernel -------------------
 # The DLAMI builds the nvidia DKMS module for the kernel it shipped with, but a
 # fresh boot can land on a newer apt kernel (e.g. 1052 -> 1057), leaving the
-# module absent -> "no CUDA-capable device". Rebuild DKMS for the live kernel.
-if ! lsmod | grep -q nvidia; then
+# module absent OR a stale module loaded against the wrong kernel -> "no
+# CUDA-capable device". The reliable gate is "can nvidia-smi enumerate a GPU",
+# NOT "is some nvidia module loaded" (lsmod can be true while nvidia-smi fails).
+if ! nvidia-smi -L >/dev/null 2>&1; then
   apt-get install -y -q "linux-headers-$(uname -r)" >/dev/null 2>&1 || true
+  rmmod nvidia_uvm nvidia_drm nvidia_modeset nvidia 2>/dev/null || true
   dkms autoinstall -k "$(uname -r)" >/dev/null 2>&1 || true
   modprobe nvidia 2>/dev/null || true
 fi
