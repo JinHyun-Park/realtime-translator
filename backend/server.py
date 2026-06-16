@@ -340,6 +340,19 @@ async def _serve_http(port: int = 9000):
             path = path.split(b"?", 1)[0]
             if path in (b"/view", b"/view/", b"/viewer.html", b"/"):
                 body, ctype = _VIEWER_HTML, b"text/html; charset=utf-8"
+            elif path == b"/healthz":
+                # Tiny readiness probe for the app's wake flow. Deliberately
+                # leaks ONLY booleans (NOT full metrics): box stopped => the app
+                # gets a CloudFront 502 (origin down); relay up but vLLM still
+                # warming => {ready:false}; everything live => {ready:true} and
+                # the app auto-presses Start. ASR is already loaded by the time
+                # this server is listening (see main()).
+                body = json.dumps({
+                    "ok": True,
+                    "vllm_up": METRICS["vllm_up"],
+                    "ready": bool(METRICS["vllm_up"] and ASR is not None),
+                }).encode()
+                ctype = b"application/json"
             else:  # /metrics or anything else
                 body = json.dumps(_metrics_snapshot()).encode()
                 ctype = b"application/json"
@@ -389,6 +402,73 @@ async def _vllm_health_loop():
         await asyncio.sleep(10)
 
 
+async def _imds(path: str, token: str | None = None) -> str:
+    # IMDSv2: stdlib urllib only. token=None => PUT to fetch the session token.
+    import urllib.request
+    base = "http://169.254.169.254/latest"
+    def _get():
+        if token is None:
+            req = urllib.request.Request(
+                base + "/api/token", method="PUT",
+                headers={"X-aws-ec2-metadata-token-ttl-seconds": "21600"})
+        else:
+            req = urllib.request.Request(
+                base + "/meta-data/" + path,
+                headers={"X-aws-ec2-metadata-token": token})
+        return urllib.request.urlopen(req, timeout=2).read().decode()
+    return await asyncio.to_thread(_get)
+
+
+async def _self_stop():
+    # Best-effort: stop THIS instance to save money. Never raises into the loop.
+    try:
+        tok = await _imds("api/token")
+        iid = await _imds("instance-id", tok)
+        region = await _imds("placement/region", tok)
+        log.warning("self-stop: stopping %s in %s", iid, region)
+        try:
+            import boto3
+            await asyncio.to_thread(
+                lambda: boto3.client("ec2", region_name=region)
+                            .stop_instances(InstanceIds=[iid]))
+        except ImportError:
+            await asyncio.create_subprocess_exec(
+                "aws", "ec2", "stop-instances",
+                "--region", region, "--instance-ids", iid)
+    except Exception:
+        log.exception("self-stop failed (box stays up; retry next cycle)")
+
+
+async def _idle_stop_loop():
+    # Self-stop after IDLE_STOP_S of ZERO capture sessions. A meeting keeps
+    # active_connections>=1 (mic+system sockets), so this never fires mid-meeting.
+    # Viewers (read-only browser tabs) do NOT count — capture sessions only.
+    if not settings.IDLE_STOP_ENABLED:
+        log.info("idle-stop disabled")
+        return
+    idle_since = None
+    booted = _time.time()
+    log.info("idle-stop armed: stop after %ds idle, %ds boot grace",
+             settings.IDLE_STOP_S, settings.IDLE_GRACE_S)
+    while True:
+        await asyncio.sleep(settings.IDLE_CHECK_S)
+        if _time.time() - booted < settings.IDLE_GRACE_S:
+            idle_since = None          # don't even arm the clock during grace
+            continue
+        capture = METRICS["active_connections"] - len(VIEWERS)
+        if capture > 0 or METRICS["asr_inflight"] > 0:
+            idle_since = None
+            continue
+        if idle_since is None:
+            idle_since = _time.time()
+            log.info("idle window started (no capture sessions)")
+        elif _time.time() - idle_since >= settings.IDLE_STOP_S:
+            log.warning("idle %ds with zero capture sessions — self-stopping",
+                        settings.IDLE_STOP_S)
+            await _self_stop()
+            return
+
+
 async def main():
     global ASR, ASR_SEM, ASR_EXEC
     n = max(1, settings.ASR_WORKERS)
@@ -407,6 +487,7 @@ async def main():
 
     await _serve_http()
     asyncio.create_task(_vllm_health_loop())   # active backend watchdog
+    asyncio.create_task(_idle_stop_loop())     # self-stop when idle (cost guard)
     async with websockets.serve(
         handle, settings.HOST, settings.PORT, max_size=None, ping_interval=20
     ):

@@ -50,6 +50,19 @@ class Settings:
     ASR_WORKERS = _i("RT_ASR_WORKERS", 1)
     # GPUs to spread the replicas across (round-robin device_index).
     ASR_NUM_GPUS = _i("RT_ASR_NUM_GPUS", 1)
+
+    # --- auto-stop on idle (personal GPU-cost guard) ---
+    # Self-stop the EC2 box after this many seconds of ZERO capture sessions.
+    # A meeting = the Mac app pressed Start = mic+system capture WebSockets, so
+    # the box never stops mid-meeting. Viewers alone do NOT keep it alive.
+    IDLE_STOP_S = _i("RT_IDLE_STOP_S", 900)        # 15 min of zero capture
+    # Don't even arm the idle clock until this long after boot (cold-start grace
+    # so the user has time to press Start after waking the box).
+    IDLE_GRACE_S = _i("RT_IDLE_GRACE_S", 600)      # 10 min
+    # Master switch — set "0" to disable self-stop (e.g. while load-testing).
+    IDLE_STOP_ENABLED = _s("RT_IDLE_STOP_ENABLED", "1") == "1"
+    # How often the idle-watcher checks.
+    IDLE_CHECK_S = _i("RT_IDLE_CHECK_S", 60)
     # --- hallucination suppression thresholds ---
     # If a segment's no-speech probability is above this, treat it as silence
     # (drops the "Thank you for watching" type invented text). Higher = stricter.
