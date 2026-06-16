@@ -48,6 +48,10 @@ if ! aws iam get-role --role-name $ROLE >/dev/null 2>&1; then
 fi
 aws iam put-role-policy --role-name $ROLE --policy-name rt-s3-read --policy-document \
   "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":[\"s3:GetObject\"],\"Resource\":\"arn:aws:s3:::$BUCKET/*\"}]}"
+# Self-stop on idle: the box may stop ITSELF (never start — that's the wake
+# Lambda's job). Scoped to instances tagged project=realtime-translator.
+aws iam put-role-policy --role-name $ROLE --policy-name rt-self-stop --policy-document \
+  "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":[\"ec2:StopInstances\"],\"Resource\":\"arn:aws:ec2:$REGION:$ACCT:instance/*\",\"Condition\":{\"StringEquals\":{\"ec2:ResourceTag/project\":\"realtime-translator\"}}}]}"
 if ! aws iam get-instance-profile --instance-profile-name $PROFILE >/dev/null 2>&1; then
   aws iam create-instance-profile --instance-profile-name $PROFILE
   aws iam add-role-to-instance-profile --instance-profile-name $PROFILE --role-name $ROLE
