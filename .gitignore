@@ -23,3 +23,5 @@ deploy/.cloudfront-id
 deploy/.relay-token
 deploy/.instance-id.big
 deploy/.golden-ami
+deploy/.eip-alloc
+deploy/.wake-url

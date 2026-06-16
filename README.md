@@ -1,119 +1,306 @@
-# Realtime Translator (KO ↔ JA)
+# Realtime Translator (KO ↔ JA ↔ EN)
 
-Mac app that captures **system audio + your selected mic/output device** and shows
-**live translation** on screen, powered by self-hosted **open-weight** models.
-Default pair is Korean ↔ Japanese (auto-detects which side spoke); English is
-also supported. Any language pair works as long as the models support it.
+A Mac app that captures **system audio (what you hear) + your microphone** and shows
+**live, on-screen translation** — powered entirely by **self-hosted open-weight**
+models on a GPU box you own. Built for meetings/calls (Zoom, etc.): one person
+captures, and the whole team can watch the subtitles in a browser (**broadcast mode**).
+
+Default pair is **Korean ↔ Japanese** (it auto-detects which side spoke); **English**
+is also supported, and any pair works as long as the models do.
 
 ```
-[Mac app (Swift/SwiftUI)]                         [Relay (Python)]                 [Open models]
- System audio  (ScreenCaptureKit) ─┐
- + Mic / input (AVAudioEngine)     ─┼─ mix → 16k PCM16 ─WS→  VAD endpointing      faster-whisper large-v3 (ASR)
- + Output device picker            ─┘                        + sentence buffer    Qwen3-32B via vLLM/Ollama (MT)
-        └── live subtitle overlay  ←──── JSON {interim, final} ────────────────────────────────────
+ ┌─ Mac app (Swift/SwiftUI) ─────────────┐        ┌─ Relay (Python, asyncio) ─┐      ┌─ Open models (GPU) ─────────┐
+ │  System audio  (ScreenCaptureKit)  ───┼─ wss ─▶│  per-stream VAD            │─────▶│ faster-whisper large-v3 (ASR)│
+ │  Microphone    (AVAudioEngine)     ───┤        │  endpointing + buffering  │      │ Qwen3-32B-AWQ via vLLM  (MT) │
+ │  live subtitle UI  ◀──────────────────┼─ JSON ─┤  translate + context      │◀─────│ (OpenAI-compatible :8000)    │
+ └───────────────────────────────────────┘  {interim,final}                   │      └─────────────────────────────┘
+                                              └─ fan-out ─▶ N browser viewers (/view)  ← broadcast mode
 ```
 
-## Why open-weight (and why the "model in Tokyo" idea changes)
+- **No paid hosted API.** OpenAI Realtime / Gemini Live are closed APIs — you can't
+  put *their* model on *your* server. This hosts the strongest **open** stack instead,
+  so all audio stays on infrastructure you control.
+- **No mid-sentence cutting.** The classic "translation chops my sentence in half"
+  problem is an **endpointing/VAD** problem, not a model one — solved here (see below).
+- **Cost-guarded personal server.** The GPU box **auto-stops when idle** and the app
+  **wakes it on demand**, so you can leave it "always available" without paying 24/7.
 
-OpenAI Realtime and Gemini Live are **hosted paid APIs** — they don't give you
-the weights, so you can't "put the model on a Tokyo instance"; you'd only host a
-relay that calls out to them and pays per second of audio. Since the requirement
-is *host the best model ourselves in Tokyo*, this uses the strongest **open**
-stack instead:
+---
 
-- **ASR:** `faster-whisper large-v3` — best open multilingual recognizer for KO/JA.
-- **Translation:** `Qwen3-32B` (served by vLLM), OpenAI-compatible. Swap to
-  `gemma-3-27b-it` or `Qwen3-8B` freely. See `backend/deploy_tokyo.md`.
+## Table of contents
+- [Features](#features)
+- [How it works](#how-it-works)
+- [The "sentences get cut in half" problem](#the-sentences-get-cut-in-half-problem--solved-here)
+- [Using the Mac app](#using-the-mac-app)
+- [Broadcast mode (team viewing)](#broadcast-mode-team-viewing)
+- [Personal always-available server (auto-stop + wake)](#personal-always-available-server-auto-stop--wake)
+- [Quick start (local, no cloud)](#quick-start-local-no-cloud)
+- [Deploy the GPU box (Tokyo)](#deploy-the-gpu-box)
+- [Deploying to *your own* AWS account](#deploying-to-your-own-aws-account)
+- [Configuration knobs](#configuration-knobs)
+- [Repo layout](#repo-layout)
+- [Troubleshooting](#troubleshooting)
+
+---
+
+## Features
+
+| Area | What you get |
+|---|---|
+| **Capture** | System audio **and** mic, as **two independent streams** (mixing them wrecked recognition). Mic = "🎙 Me", system = "🔊 Them", tagged in the UI. |
+| **ASR** | `faster-whisper large-v3` on GPU; CPU `small`/`base` for local demo. |
+| **Translation** | `Qwen3-32B-AWQ` via vLLM (OpenAI-compatible). Carries the last few sentences as **context** so pronouns/topic stay coherent. |
+| **Anti-cut** | VAD endpointing waits for a real pause before locking a sentence; a live grey **interim** line updates as you speak, then commits to a solid **final**. |
+| **Broadcast** | One capturer → relay translates **once** → **N browser viewers** watch subtitles at `/view` (no app, no permissions, just a URL + password). |
+| **Auth** | Single shared password (token). Required on every connection — capture app and viewers alike. |
+| **Auto-save** | Every finalized line is written to `~/Documents/RealtimeTranslator/transcript-*.md` the instant it arrives — quit/crash never loses the transcript. |
+| **Cost guard** | GPU box **self-stops after 15 min idle** (never mid-meeting), **wakes on demand** from the app, and reports readiness so the app auto-starts when the model is loaded. |
+
+---
+
+## How it works
+
+1. The Mac app opens **two WebSocket connections** to the relay — one for the mic,
+   one for system audio. Each sends raw 16 kHz PCM16. They're kept separate on
+   purpose: summing mic + system audio produced garbage recognition.
+2. The relay runs **per-connection VAD endpointing** (`segmenter.py`): it detects
+   speech, buffers an utterance, emits **interim** re-transcriptions while you talk,
+   and a **final** when you pause long enough.
+3. Each segment goes to **whisper** (ASR), then to **Qwen3 via vLLM** (translation),
+   with recent sentences as context. The result `{interim|final, source, translation}`
+   is sent back to the app **and** fanned out to any **browser viewers**.
+4. Everything is gated by a **shared token**; the GPU box is reachable only through
+   **CloudFront** (no raw public port).
+
+---
 
 ## The "sentences get cut in half" problem — solved here
 
 This is an **endpointing/VAD** problem, not a model problem. The relay listens
-**longer** before deciding a sentence is finished, and re-translates as more
-audio arrives. The dials (env vars, `backend/config.py`):
+**longer** before deciding a sentence ended, and re-translates as more audio arrives.
+The main dial is `RT_MIN_SILENCE_MS` — raise it if sentences still split.
 
-| Knob | Default | Effect |
+| Knob | Default (Tokyo) | Effect |
 |---|---|---|
-| `RT_MIN_SILENCE_MS` | `900` | **The main one.** Pause length required to *lock* a sentence. Raise to 1100–1300 if sentences still split; short "음…"/comma pauses won't finalize. |
-| `RT_MAX_SEGMENT_MS` | `12000` | Safety flush for a non-stop talker. |
-| `RT_PREROLL_MS` | `300` | Audio kept *before* speech onset so the first syllable is never clipped. |
+| `RT_MIN_SILENCE_MS` | `1000` | **The main one.** Pause length required to *lock* a sentence. Raise to 1100–1300 if it still splits; short "음…"/comma pauses won't finalize. |
+| `RT_MAX_SEGMENT_MS` | `15000` | Safety flush for a non-stop talker. |
+| `RT_PREROLL_MS` | `300` | Audio kept *before* speech onset so the first syllable isn't clipped. |
 | `RT_MIN_SPEECH_MS` | `300` | Ignore coughs/blips below this. |
-| `RT_INTERIM_INTERVAL_MS` | `500` | How often the grey "in-progress" translation refreshes. |
+| `RT_INTERIM_INTERVAL_MS` | `700` | How often the grey in-progress line refreshes. |
 | `RT_VAD_AGGRESSIVENESS` | `2` | webrtcvad 0–3; higher = calls quiet bits silence sooner. |
 
-Behavior: while you speak, a **grey interim** line updates live; when you pause
-long enough, it commits to a **solid final** line. Finals carry the last few
-sentences as **context** to the LLM so pronouns/topic stay consistent.
+---
 
-## Quick start (local demo, no cloud)
+## Using the Mac app
+
+1. **Server** — the WebSocket URL of your relay, e.g. `wss://<your-cloudfront>.cloudfront.net`
+   (or `ws://localhost:8765` for local).
+2. **Password** — the shared token (`deploy/.relay-token`). Enter it in the password
+   field. *(Older builds without a password field: append it to the URL instead, as
+   `wss://host/?token=YOUR_TOKEN`.)*
+3. **Languages** — pick the pair (KO/JA/EN); the relay auto-detects which side spoke.
+4. **Audio sources** — leave **System audio** + **Microphone** on; pick input/output devices.
+5. Press **Start** (or **Wake & Start**, see below). The status dot turns **green/Connected**;
+   speak or play a video and subtitles appear.
+
+> **Permissions (first launch):** macOS asks for **Microphone** and **Screen Recording**
+> (system-audio capture rides on the screen-recording grant). Approve both in
+> System Settings → Privacy & Security, then relaunch.
+
+> **Build/sign:** `mac-app/bundle.sh` builds a signed `.app`. It signs with a stable
+> *Apple Development* identity so the code hash stays constant across rebuilds —
+> otherwise macOS resets your Mic/Screen-Recording grants on every build.
+
+---
+
+## Broadcast mode (team viewing)
+
+For meetings where **everyone should see the subtitles**: one person runs the Mac app
+and captures the meeting's system audio; the relay translates **once** and fans the
+subtitles out to any number of **browser viewers**.
+
+- Viewers open **`https://<your-cloudfront>.cloudfront.net/view`**, enter the password once,
+  and watch live — **no app, no permissions, no audio upload**. Server load is one stream
+  regardless of viewer count.
+- The capturer connects to `/` (capture socket); viewers connect to `/viewsock`. CloudFront
+  routes `/view*` to the HTML page and the rest to the relay.
+
+---
+
+## Personal always-available server (auto-stop + wake)
+
+A 32B model on an L40S costs ~$2/hr — fine in bursts, painful 24/7. So the box is set up
+to be **"always available but only billed when used"**:
+
+- **Auto-stop:** the relay self-stops after **15 min with zero capture sessions**
+  (`RT_IDLE_STOP_S=900`, with a 10-min post-boot grace). A meeting keeps the mic+system
+  capture sockets open, so **it never stops mid-meeting**. Browser viewers alone do *not*
+  keep it alive. Implemented in `server.py` (`_idle_stop_loop` → `_self_stop`, via IMDSv2 +
+  `ec2:StopInstances` scoped by tag).
+- **Wake on demand:** an always-on **`rt-wake` Lambda** (reached only through CloudFront,
+  IAM-signed via OAC) starts the box. Call it from the app or:
+  ```bash
+  curl "https://<your-cloudfront>.cloudfront.net/wake?token=YOUR_TOKEN"
+  ```
+- **Readiness:** the relay serves **`/healthz`** (booleans only). While the box is down
+  CloudFront returns 5xx; once the relay is up but the 32B model is still loading you get
+  `{"ready":false}`; when fully loaded, `{"ready":true}`.
+- **App integration:** the **"Wake & Start"** button wakes the box, polls `/healthz`, plays
+  a sound when ready, and auto-presses Start. **Cold wake → ready is ≈ 6 minutes** (mostly
+  vLLM loading the 32B weights; stop/start preserves the kernel + model cache on EBS, so
+  boot itself is fast).
+
+> ⚠️ If you're on an **older app build without the Wake button**, a stopped box won't wake
+> itself — you'll just see "no subtitles". Either rebuild/reinstall the app, or wake it
+> manually with the `curl` above, then press Start.
+
+---
+
+## Quick start (local, no cloud)
 
 ```bash
 # 1. Backend (CPU whisper + Ollama Qwen3)
 brew install ollama
-ollama serve            # in one terminal
-cd backend && ./run_local.sh   # installs deps, pulls qwen3:8b, starts relay
+ollama serve                     # one terminal
+cd backend && ./run_local.sh     # installs deps, pulls qwen3:8b, starts relay on :8765
 
 # 2. Mac app
 cd ../mac-app && ./bundle.sh
 open RealtimeTranslator.app
 ```
 
-In the app: server `ws://localhost:8765`, leave **System audio** + **Microphone**
-on, pick your input/output devices, press **Start**. Play a Japanese video or
-speak Korean — translations appear live.
+In the app: server `ws://localhost:8765`, leave a blank password (local relay is open
+by default), System audio + Microphone on, press **Start**.
 
-> **Permissions:** first launch macOS will ask for **Microphone** and **Screen
-> Recording** (system-audio capture rides on the screen-recording permission).
-> Approve both in System Settings → Privacy & Security, then relaunch. The app is
-> ad-hoc signed; if Gatekeeper blocks it, right-click → Open once.
+---
 
-## Tokyo GPU (best quality) — automated
+## Deploy the GPU box
 
-The whole box is provisioned by scripts in **`deploy/`** — no SSH keys, no public
-ports (reachable only via SSM, per the no-public-exposure rule).
+The whole box is provisioned by scripts in **`deploy/`** — **no SSH keys, no public ports**
+(reachable only via SSM + CloudFront, per the no-public-exposure rule). It uses **whatever
+AWS credentials your shell is logged into** (`aws sso login` / `aws configure`) — nothing
+is hardcoded.
 
 ```bash
-deploy/launch.sh                 # package -> S3, IAM+SG, launch g6e.2xlarge in Tokyo
+# one-time: create the access token the relay/app will share
+echo "$(openssl rand -hex 12)" > deploy/.relay-token   # gitignored
+
+deploy/launch.sh                 # package backend -> S3, IAM+SG+EIP, launch g6e.2xlarge in Tokyo
                                  #   (override size:  INSTANCE_TYPE=g6e.12xlarge deploy/launch.sh)
-# wait until bootstrap reaches READY (watch /var/run/rt-status over SSM)
-deploy/connect.sh                # SSM port-forward  ws://localhost:8765  (leave running)
-# -> in the Mac app set server = ws://localhost:8765, press Start
-deploy/teardown.sh stop          # stop billing when done  (or: terminate)
+# wait for bootstrap to reach READY  (watch /var/run/rt-status over SSM)
+deploy/wake-deploy.sh            # deploy the wake Lambda + wire it behind CloudFront
+
+deploy/connect.sh                # optional: SSM port-forward ws://localhost:18765 (local dev)
+deploy/teardown.sh stop          # stop billing  (or: terminate to delete)
 ```
 
 What `launch.sh` builds:
-- **AMI** Deep Learning PyTorch 2.7 (Ubuntu 22.04), **g6e.2xlarge** (1× L40S 46GB)
-- **IAM** `rt-translator-ec2-role` (SSM core + read-only on the deploy bucket)
-- **SG** `rt-translator-sg` with **zero inbound** — Session Manager only
-- **user-data** pulls `backend/` from S3 and starts two systemd units:
-  `rt-vllm` (Qwen3-32B-AWQ on :8000) and `rt-relay` (whisper large-v3 + WS on :8765),
-  both bound to `127.0.0.1`. A readiness probe flips `/var/run/rt-status` to `READY`.
+- **AMI:** Deep Learning PyTorch 2.7 (Ubuntu 22.04) — or a recorded golden AMI for faster boot.
+- **Instance:** `g6e.2xlarge` (1× L40S 48 GB) by default.
+- **IAM:** `rt-translator-ec2-role` — SSM core, read-only on the deploy bucket, and
+  **self-stop** (`ec2:StopInstances` scoped to `project=realtime-translator`).
+- **SG:** `rt-translator-sg` with **zero inbound** — Session Manager + CloudFront origin only.
+- **EIP:** a fixed Elastic IP so the CloudFront origin and app URL survive stop/start.
+- **user-data:** pulls `backend/` from S3 and starts two systemd units — `rt-vllm`
+  (Qwen3-32B-AWQ on :8000) and `rt-relay` (whisper large-v3 + WS on :8765, HTTP on :9000),
+  bound to localhost. A readiness probe flips `/var/run/rt-status` to `READY`.
 
-> **Cost:** g6e.2xlarge bills ~\$2/hr while running. `deploy/teardown.sh stop` when
-> idle (a stopped instance still pays ~\$16/mo for its 200 GB EBS; `terminate` to zero it).
+> **Pinned versions (don't bump blindly):** vLLM **0.22.1** + starlette **1.2.1** +
+> fastapi **0.136.3**. Newer combos throw `'_IncludedRouter' object has no attribute 'path'`
+> → HTTP 500 on every request. Pinned in `userdata.sh`.
 
-> **Scaling to ~20 concurrent users:** a single L40S is fine for the *translation*
-> LLM (vLLM continuous batching) but the *ASR* path is the bottleneck — 20 live
-> whisper streams will queue on one model. For real 20-user load, go
-> `g6e.12xlarge` (4× L40S) AND give the relay multiple ASR workers (the current
-> relay shares one ASR model behind a global lock). See `backend/deploy_tokyo.md`.
+> **GPU memory:** single-GPU box uses `--gpu-memory-utilization 0.78` (whisper shares the
+> card with vLLM); multi-GPU uses `0.90` (vLLM gets GPU0 to itself). Auto-detected.
 
-## Layout
+---
+
+## Deploying to *your own* AWS account
+
+The credential model is already portable — **log into your account and run the scripts**:
+
+```bash
+aws sso login            # or: aws configure   (whatever puts valid creds in your shell)
+deploy/launch.sh         # creates everything IN YOUR ACCOUNT (account ID is read at runtime)
+```
+
+There are **no hardcoded keys**. The only values tied to the original environment that you
+may want to change:
+
+| Value | Where | Change to |
+|---|---|---|
+| **Region** | `deploy/*.sh` (`REGION=ap-northeast-1`) | your region (most accept a `REGION=` override) |
+| **App default server URL** | `mac-app/.../AppModel.swift` (`serverURL`) | your CloudFront domain — or just type it in the app's Server field at runtime |
+| **Access token** | `deploy/.relay-token` (gitignored) | generate your own (`openssl rand -hex 12`) |
+| **Golden AMI** | `deploy/.golden-ami` (gitignored) | leave empty — it falls back to the public DLAMI (`FORCE_DLAMI=1`) |
+
+Everything else (account ID, instance IDs, distribution IDs) is created fresh in *your*
+account at deploy time.
+
+---
+
+## Configuration knobs
+
+All knobs are env-overridable so the **same code** runs locally and in Tokyo
+(`backend/config.py`). See `backend/.env.local.example` and `backend/.env.tokyo.example`
+for ready-to-copy sets. Highlights:
+
+- **Endpointing:** `RT_MIN_SILENCE_MS`, `RT_MAX_SEGMENT_MS`, `RT_PREROLL_MS`,
+  `RT_VAD_AGGRESSIVENESS`, `RT_INTERIM_INTERVAL_MS`, `RT_INTERIM_WINDOW_MS`.
+- **ASR:** `RT_ASR_MODEL`, `RT_ASR_DEVICE`, `RT_ASR_COMPUTE`, `RT_ASR_WORKERS`, `RT_ASR_NUM_GPUS`.
+- **Translation:** `RT_LLM_BASE_URL`, `RT_LLM_MODEL`, `RT_LLM_TEMPERATURE`, `RT_CONTEXT_WINDOW`.
+- **Auth:** `RT_RELAY_TOKEN` (empty = open dev relay).
+- **Cost guard:** `RT_IDLE_STOP_S`, `RT_IDLE_GRACE_S`, `RT_IDLE_STOP_ENABLED`, `RT_IDLE_CHECK_S`.
+
+---
+
+## Repo layout
 
 ```
 backend/
-  server.py        WebSocket relay (asyncio + websockets)
-  segmenter.py     VAD endpointing — the anti-cut logic
-  asr.py           faster-whisper wrapper
-  translator.py    OpenAI-compatible LLM translation + context
-  config.py        all tunable knobs (env-overridable)
-  run_local.sh     one-shot local launcher
-  deploy_tokyo.md  GPU deploy guide
+  server.py          WebSocket relay (asyncio + websockets); auth, broadcast,
+                     /healthz, idle self-stop, vLLM health watchdog
+  segmenter.py       VAD endpointing — the anti-cut logic
+  asr.py             faster-whisper wrapper (multi-GPU via device_index)
+  translator.py      OpenAI-compatible LLM translation + context window
+  config.py          all tunable knobs (env-overridable)
+  viewer.html        broadcast viewer page (vanilla JS, served at /view)
+  run_local.sh       one-shot local launcher
+  deploy_tokyo.md    GPU deploy notes
+deploy/
+  launch.sh          provision the box (IAM, SG, EIP, EC2, S3) in the current account
+  userdata.sh        first-boot bootstrap (DLAMI path)
+  userdata-golden.sh fast-boot bootstrap (golden AMI path; nvidia-smi DKMS guard)
+  wake_lambda.py     always-on Lambda that starts the box on demand
+  wake-deploy.sh     deploy the wake Lambda + wire it behind CloudFront (OAC)
+  connect.sh         self-healing SSM port-forward supervisor (local dev)
+  teardown.sh        stop / terminate the box
+  cloudfront-teardown.sh   delete the CloudFront distribution + close the SG
 mac-app/
   Sources/RealtimeTranslator/
-    Audio/         Resampler, Mixer, SystemAudioCapture, MicCapture, AudioDevices
-    Net/           RelayClient (WebSocket)
-    Views/         ContentView (controls), TranscriptView (live subtitles)
-    AppModel.swift main view model
-    main.swift     app entry
-  bundle.sh        build + wrap into a signed .app (needed for permissions)
+    Audio/           Resampler, Mixer, SystemAudioCapture, MicCapture, AudioDevices
+    Net/             RelayClient (WebSocket)
+    Views/           ContentView (controls + Wake/Start), TranscriptView (live subtitles)
+    AppModel.swift   main view model (capture, wake, readiness, autosave)
+    main.swift       app entry
+  bundle.sh          build + wrap into a signed .app (required for permissions)
+  package-dmg.sh     wrap into a .dmg for distribution
+VERSIONS.md          tagged restore points + per-version infra notes
+TEAM_DEPLOY.md       team viewer guide (broadcast mode); .ja.md is the Japanese version
 ```
+
+---
+
+## Troubleshooting
+
+- **No subtitles, status dot stays grey / "unauthorized":** the password (token) doesn't
+  match. Stop, re-enter `deploy/.relay-token` in the password field (or `?token=` in the URL),
+  Start again.
+- **No subtitles right after opening the app:** the GPU box may have **auto-stopped** (15-min
+  idle). Use **Wake & Start** (or `curl .../wake?token=...`), wait ~6 min for `ready:true`.
+- **`active_connections: 0` in `/metrics`:** the app never connected — wrong URL, wrong
+  token, or the box is down. Check `/healthz`.
+- **vLLM 500s on every translation:** version drift — pin vLLM 0.22.1 / starlette 1.2.1 /
+  fastapi 0.136.3.
+- **GPU "no CUDA-capable device" on a fresh boot:** kernel/DKMS drift — the userdata gates on
+  `nvidia-smi -L` and rebuilds DKMS for the running kernel. A simple stop/start of the *same*
+  instance preserves the kernel and avoids this.
