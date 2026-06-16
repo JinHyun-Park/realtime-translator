@@ -84,6 +84,35 @@ final class FlowCounter: @unchecked Sendable {
     }
 }
 
+/// Where the (personal, cost-guarded) GPU box is in its wake/boot cycle. The box
+/// self-stops when idle, so the app must wake it and wait. CloudFront returns a
+/// 504 while the origin is down (booting); once the relay's HTTP server answers
+/// we read /healthz: vLLM warming => ready:false; model loaded => ready:true.
+enum ServerPhase: Equatable {
+    case idle               // nothing in flight; press Wake & Start
+    case waking             // /wake request sent
+    case booting            // box starting, /healthz unreachable (CloudFront 504)
+    case warming            // relay up, 32B vLLM still loading (ready:false)
+    case ready              // ready:true — capture can start
+    case failed(String)     // wake/poll gave up (e.g. wrong password)
+
+    /// True while we're actively waiting on the box to come up.
+    var isTransitioning: Bool {
+        switch self { case .waking, .booting, .warming: return true
+        default: return false }
+    }
+}
+
+/// Minimal decode of the relay's /healthz (booleans only — never leaks metrics).
+private struct Healthz: Decodable { let ready: Bool }
+
+/// Outcome of one /healthz probe, mapped straight onto the wake phases.
+private enum Probe {
+    case unreachable   // CloudFront 504 / timeout — box still booting
+    case warming       // 200 but ready:false — relay up, 32B vLLM loading
+    case ready         // 200 ready:true — go
+}
+
 /// One translated line shown in the transcript.
 /// `id` is globally unique across sessions (epoch*1e6 + relay seq) so the
 /// transcript can accumulate across stop/start without seq collisions.
@@ -112,6 +141,17 @@ final class AppModel: ObservableObject {
     @Published var connected = false
     @Published var running = false
     @Published var status = "Idle"
+
+    // --- Server wake / readiness (personal box self-stops when idle) ---
+    @Published var serverPhase: ServerPhase = .idle
+    // Human-readable progress line shown under the Wake button, e.g.
+    // "서버 깨우는 중… 모델 로딩 ~5분 남음".
+    @Published var wakeDetail = ""
+    // Measured cold wake→ready was ~350s (mostly 32B vLLM load). Used only for
+    // the countdown estimate; readiness is decided by /healthz, not this clock.
+    private let estimatedWakeSeconds = 360
+    private var wakeStartedAt: Date?
+    private var wakeTask: Task<Void, Never>?
 
     // Language pair (KO<->JA default). The relay auto-detects which side spoke.
     @Published var langA = "ko"
@@ -186,6 +226,139 @@ final class AppModel: ObservableObject {
         }
     }
 
+    // MARK: - Wake & readiness
+
+    /// Derive https origin + token from the wss serverURL the user already has.
+    /// CloudFront serves wss (capture), /view, /healthz and /wake off ONE host,
+    /// so we just swap the scheme. Returns nil if the URL is unusable.
+    private func httpBase() -> URL? {
+        guard var comp = URLComponents(string: serverURL) else { return nil }
+        comp.scheme = (comp.scheme == "ws") ? "http" : "https"   // wss -> https
+        comp.path = ""; comp.query = nil; comp.fragment = nil
+        return comp.url
+    }
+
+    /// One-tap: wake the box (if asleep), wait until /healthz says ready, then
+    /// auto-press Start. Safe to call when already up — /healthz returns ready
+    /// immediately and we Start without booting anything. Idempotent: a second
+    /// tap while transitioning is ignored.
+    func wakeAndStart() {
+        guard !running, !serverPhase.isTransitioning else { return }
+        guard let base = httpBase() else { serverPhase = .failed("서버 주소 오류"); return }
+        wakeStartedAt = Date()
+        serverPhase = .waking
+        wakeDetail = "서버 깨우는 중…"
+        rtlog("wakeAndStart base=\(base.absoluteString)")
+        wakeTask?.cancel()
+        wakeTask = Task { [weak self] in await self?.runWake(base: base) }
+    }
+
+    /// Cancel an in-progress wake/poll (the box keeps doing whatever it's doing;
+    /// we just stop waiting and reset the UI).
+    func cancelWake() {
+        wakeTask?.cancel(); wakeTask = nil
+        serverPhase = .idle; wakeDetail = ""
+    }
+
+    private func runWake(base: URL) async {
+        // 1) Kick the box. /wake is idempotent: running -> reports state, stopped
+        //    -> start_instances. A non-2xx with a token present == bad password.
+        let wakeURL = base.appendingPathComponent("wake")
+        var req = URLRequest(url: wakeURL, timeoutInterval: 12)
+        if !accessKey.isEmpty { req.setValue(accessKey, forHTTPHeaderField: "X-Wake-Token") }
+        do {
+            let (_, resp) = try await URLSession.shared.data(for: req)
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            if code == 401 || code == 403 {
+                await MainActor.run {
+                    self.serverPhase = .failed("비밀번호가 틀렸어요")
+                    self.wakeDetail = ""
+                }
+                return
+            }
+            await MainActor.run { self.serverPhase = .booting }
+        } catch {
+            // The wake endpoint itself being unreachable is unusual (it's the
+            // always-on Lambda via CloudFront) — surface it but still try polling
+            // in case the box is actually coming up.
+            rtlog("wake POST failed: \(error.localizedDescription)")
+            await MainActor.run { self.serverPhase = .booting }
+        }
+
+        // 2) Poll /healthz until ready (or cancelled). The HTTP signal drives the
+        //    phase directly: 504/timeout = booting; 200 ready:false = warming;
+        //    200 ready:true = go.
+        let healthURL = base.appendingPathComponent("healthz")
+        while !Task.isCancelled {
+            let probe = await Self.probeReady(healthURL)
+            if Task.isCancelled { return }
+            if case .ready = probe {
+                await MainActor.run { self.onServerReady() }
+                return
+            }
+            await MainActor.run { self.tickWakeProgress(probe) }
+            try? await Task.sleep(nanoseconds: 5 * 1_000_000_000)
+        }
+    }
+
+    /// GET /healthz with a cache-buster. 200+ready:true => .ready; 200 otherwise
+    /// => .warming; any error / non-200 (CloudFront 504 while origin down) =>
+    /// .unreachable (still booting).
+    private static func probeReady(_ healthURL: URL) async -> Probe {
+        var comp = URLComponents(url: healthURL, resolvingAgainstBaseURL: false)
+        comp?.queryItems = [URLQueryItem(name: "cb", value: UUID().uuidString)]
+        guard let url = comp?.url else { return .unreachable }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        do {
+            let (data, resp) = try await URLSession.shared.data(for: req)
+            guard (resp as? HTTPURLResponse)?.statusCode == 200 else { return .unreachable }
+            let ready = (try? JSONDecoder().decode(Healthz.self, from: data))?.ready ?? false
+            return ready ? .ready : .warming
+        } catch { return .unreachable }
+    }
+
+    /// Drive phase + countdown text off the latest probe.
+    private func tickWakeProgress(_ probe: Probe) {
+        guard serverPhase.isTransitioning else { return }
+        let elapsed = Int(Date().timeIntervalSince(wakeStartedAt ?? Date()))
+        let remain = max(0, estimatedWakeSeconds - elapsed)
+        let mins = (remain + 59) / 60
+        switch probe {
+        case .unreachable:
+            serverPhase = .booting
+            wakeDetail = remain > 0
+                ? "서버 부팅 중… 약 \(mins)분 남음"
+                : "서버 부팅 중…"
+        case .warming:
+            // Relay is up; the long pole is the 32B model load.
+            serverPhase = .warming
+            wakeDetail = remain > 0
+                ? "모델 로딩 중… 약 \(mins)분 남음"
+                : "모델 로딩 중… 거의 다 됐어요"
+        case .ready:
+            break   // handled in onServerReady
+        }
+    }
+
+    /// /healthz said ready — notify the user and auto-start capture.
+    private func onServerReady() {
+        serverPhase = .ready
+        wakeDetail = "준비 완료 — 시작합니다"
+        wakeTask = nil
+        notifyReady()
+        // Auto-press Start so one tap = end-to-end. If the user already pressed
+        // Stop in the meantime we respect that (running guard inside start()).
+        if !running { start() }
+    }
+
+    /// Gentle "your server is ready" ping: system sound + dock bounce, so the
+    /// user can look away during the ~6-min wake and get pulled back.
+    private func notifyReady() {
+        NSSound(named: "Glass")?.play()
+        NSApp.requestUserAttention(.informationalRequest)
+    }
+
     // MARK: - Lifecycle
 
     func start() {
@@ -227,6 +400,8 @@ final class AppModel: ObservableObject {
 
         running = true
         status = "Listening…"
+        serverPhase = .ready   // we're capturing; clear any wake-progress text
+        wakeDetail = ""
         dbgTimer?.invalidate()
         dbgTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             Task { @MainActor in
@@ -301,6 +476,7 @@ final class AppModel: ObservableObject {
     }
 
     func stop() {
+        wakeTask?.cancel(); wakeTask = nil
         dbgTimer?.invalidate(); dbgTimer = nil
         mic.stop()
         if #available(macOS 13.0, *), let cap = sysCapture as? SystemAudioCapture {
@@ -311,6 +487,8 @@ final class AppModel: ObservableObject {
         sysClient.disconnect()
         running = false
         status = "Stopped"
+        serverPhase = .idle
+        wakeDetail = ""
     }
 
     func swapLanguages() {

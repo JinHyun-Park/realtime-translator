@@ -98,17 +98,69 @@ struct ControlPanel: View {
                     }.padding(6)
                 }
 
-                // Start/stop
-                Button(action: { model.running ? model.stop() : model.start() }) {
-                    Label(model.running ? "Stop" : "Start",
-                          systemImage: model.running ? "stop.fill" : "play.fill")
+                // Start / Wake & Start / Stop
+                StartControl()
+            }
+            .padding()
+        }
+    }
+}
+
+/// The primary action button + server-wake progress.
+///
+/// - Not running, box may be asleep → "Wake & Start": wakes the GPU box (if
+///   needed), waits on /healthz, then auto-starts capture. Pressing it when the
+///   box is already up just starts immediately (/healthz returns ready at once).
+/// - Transitioning (waking/booting/warming) → progress text + Cancel.
+/// - Running → "Stop".
+struct StartControl: View {
+    @EnvironmentObject var model: AppModel
+
+    var body: some View {
+        VStack(spacing: 8) {
+            if model.running {
+                Button(action: { model.stop() }) {
+                    Label("Stop", systemImage: "stop.fill")
                         .frame(maxWidth: .infinity)
                 }
                 .controlSize(.large)
                 .buttonStyle(.borderedProminent)
-                .tint(model.running ? .red : .accentColor)
+                .tint(.red)
+            } else if model.serverPhase.isTransitioning {
+                // Waiting on the box — show a live progress card with Cancel.
+                VStack(spacing: 8) {
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text(model.wakeDetail.isEmpty ? "서버 준비 중…" : model.wakeDetail)
+                            .font(.callout)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }.frame(maxWidth: .infinity, alignment: .leading)
+                    Button(action: { model.cancelWake() }) {
+                        Text("취소").frame(maxWidth: .infinity)
+                    }.controlSize(.regular)
+                }
+                .padding(10)
+                .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
+            } else {
+                // Idle (or just failed) — offer the one-tap wake+start.
+                Button(action: { model.wakeAndStart() }) {
+                    Label("Wake & Start", systemImage: "power")
+                        .frame(maxWidth: .infinity)
+                }
+                .controlSize(.large)
+                .buttonStyle(.borderedProminent)
+
+                if case .failed(let why) = model.serverPhase {
+                    Text(why)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                Text("서버가 꺼져 있으면 깨우고, 준비되면 자동으로 시작해요 (최대 ~6분).")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .padding()
         }
     }
 }
