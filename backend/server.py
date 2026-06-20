@@ -270,8 +270,9 @@ async def _handle(ws):
     pair: tuple[str, str] = ("ko", "ja")
     stream: str | None = None     # "me" | "them" — set via config, tags broadcasts
     # Register this capture session for the admin dashboard (metadata only).
+    _started = _time.time()
     cap_info = {"stream": None, "pair": list(pair), "finals": 0,
-                "last_ts": _time.time()}
+                "started_ts": _started, "last_ts": _started}
     CAPTURES_BY_ROOM.setdefault(room, []).append(cap_info)
     # Drop stale interim work if a newer one for the same seq arrives.
     interim_tasks: dict[int, asyncio.Task] = {}
@@ -395,6 +396,27 @@ async def _handle(ws):
             if not caps:
                 CAPTURES_BY_ROOM.pop(room, None)
         log.info("client disconnected: %s room=%s", peer, room)
+        # Append this ended session's METADATA (no transcript) to S3 history, so
+        # the admin dashboard shows past sessions across box restarts. Only log
+        # sessions that actually produced something (finals>0) to skip noise.
+        if cap_info["finals"] > 0:
+            ended = _time.time()
+            import datetime as _dt
+            day = _dt.datetime.utcfromtimestamp(ended).strftime("%Y-%m-%d")
+            record = {
+                "room": room,
+                "stream": cap_info["stream"],
+                "pair": cap_info["pair"],
+                "finals": cap_info["finals"],
+                "started_ms": int(cap_info["started_ts"] * 1000),
+                "ended_ms": int(ended * 1000),
+                "duration_s": int(ended - cap_info["started_ts"]),
+            }
+            try:
+                from session_log import log_session
+                asyncio.create_task(log_session(record, day, record["ended_ms"]))
+            except Exception:
+                pass
 
 
 def _metrics_snapshot() -> dict:
@@ -520,11 +542,12 @@ async def _serve_http(port: int = 9000):
             qs = parse_qs(parsed.query)
             if path in (b"/view", b"/view/", b"/viewer.html", b"/"):
                 body, ctype = _VIEWER_HTML, b"text/html; charset=utf-8"
-            elif path in (b"/admin", b"/admin/", b"/admin/rooms"):
-                # Operator-only room overview. Gated by a SEPARATE admin token.
+            elif path in (b"/admin", b"/admin/", b"/admin/rooms", b"/admin/history"):
+                # Operator-only views. Gated by a SEPARATE admin token.
                 # /admin -> HTML page (loads even without token; it then prompts
-                # and fetches /admin/rooms with the token). /admin/rooms -> JSON,
-                # which is the actual gated data.
+                # and fetches the JSON endpoints with the token).
+                # /admin/rooms -> live room overview JSON (gated).
+                # /admin/history -> recent ended-session metadata from S3 (gated).
                 if path == b"/admin/rooms":
                     if not _admin_ok(qs):
                         _reply(writer, b'{"error":"unauthorized"}',
@@ -537,6 +560,21 @@ async def _serve_http(port: int = 9000):
                                    "viewers": _total_viewers()},
                         "uptime_s": int(_time.time() - _START_TS),
                     }).encode()
+                    ctype = b"application/json"
+                elif path == b"/admin/history":
+                    if not _admin_ok(qs):
+                        _reply(writer, b'{"error":"unauthorized"}',
+                               b"application/json", b"401 Unauthorized")
+                        await writer.drain(); return
+                    # last ~7 UTC days of session metadata
+                    import datetime as _dt
+                    from session_log import recent_sessions
+                    today = _dt.datetime.utcfromtimestamp(_time.time())
+                    days = [(today - _dt.timedelta(days=i)).strftime("%Y-%m-%d")
+                            for i in range(7)]
+                    sessions = await recent_sessions(days, limit=200)
+                    body = json.dumps({"sessions": sessions,
+                                       "enabled": bool(settings.SESSION_BUCKET)}).encode()
                     ctype = b"application/json"
                 else:
                     body, ctype = _ADMIN_HTML, b"text/html; charset=utf-8"

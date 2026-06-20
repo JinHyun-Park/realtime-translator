@@ -46,6 +46,12 @@ class Settings:
     # at /admin. If unset, the admin dashboard is DISABLED entirely (404) rather
     # than falling back to the shared token. Set RT_ADMIN_TOKEN in the unit.
     ADMIN_TOKEN = _s("RT_ADMIN_TOKEN", "")
+    # Session history: ended-session METADATA (no transcript) is appended to this
+    # S3 bucket so the admin dashboard shows past sessions across box restarts.
+    # Empty => history logging disabled (e.g. local dev). Reuses the deploy bucket
+    # by default (under a sessions/ prefix; the box role has scoped write there).
+    SESSION_BUCKET = _s("RT_SESSION_BUCKET", "")
+    SESSION_REGION = _s("RT_SESSION_REGION", _s("RT_BEDROCK_REGION", "ap-northeast-1"))
 
     # --- Audio (must match what the Mac app sends) ---
     SAMPLE_RATE = _i("RT_SAMPLE_RATE", 16000)   # Hz, mono PCM16 LE
