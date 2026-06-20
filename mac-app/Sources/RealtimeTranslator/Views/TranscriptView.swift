@@ -1,7 +1,12 @@
+import AppKit
 import SwiftUI
 
 /// Live subtitle / transcript. Finalized lines are solid; the in-progress
 /// interim line is shown greyed at the bottom and keeps getting revised.
+///
+/// Rendered as ONE NSTextView (via SelectableText) so the whole transcript is a
+/// single selection surface — the user can drag across every line at once,
+/// Cmd+A, and copy. (A SwiftUI `Text` stack only selects one line at a time.)
 struct TranscriptView: View {
     @EnvironmentObject var model: AppModel
     @State private var showSource = true
@@ -33,79 +38,72 @@ struct TranscriptView: View {
             .padding(.horizontal, 14).padding(.vertical, 8)
             Divider()
 
-            ScrollViewReader { proxy in
-                ScrollView {
-                    // textSelection lets the user drag-select & copy lines, but
-                    // Text views are inherently read-only (no typing into them).
-                    LazyVStack(alignment: .leading, spacing: 14) {
-                        ForEach(model.lines) { line in
-                            LineRow(line: line, showSource: showSource, dim: false)
-                                .id(line.id)
-                        }
-                        if let m = model.micInterim {
-                            LineRow(line: m, showSource: showSource, dim: true).id(-1)
-                        }
-                        if let s = model.sysInterim {
-                            LineRow(line: s, showSource: showSource, dim: true).id(-2)
-                        }
-                    }
-                    .textSelection(.enabled)
-                    .padding(16)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                .onChange(of: model.lines.count) { _, _ in
-                    withAnimation { proxy.scrollTo(model.lines.last?.id ?? -1, anchor: .bottom) }
-                }
-                .onChange(of: model.micInterim?.translation) { _, _ in
-                    withAnimation { proxy.scrollTo(-1, anchor: .bottom) }
-                }
-                .onChange(of: model.sysInterim?.translation) { _, _ in
-                    withAnimation { proxy.scrollTo(-2, anchor: .bottom) }
-                }
-            }
+            SelectableText(attributed: transcriptAttributed(), autoScroll: true)
+                .padding(.horizontal, 12).padding(.vertical, 8)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
         }
+    }
+
+    /// Build the whole transcript (finals + the two interim lines) as one
+    /// attributed string: speaker label + (optional) source + translation.
+    private func transcriptAttributed() -> NSAttributedString {
+        let out = NSMutableAttributedString()
+        for line in model.lines {
+            out.append(TranscriptStyle.block(line, showSource: showSource, dim: false))
+        }
+        if let m = model.micInterim {
+            out.append(TranscriptStyle.block(m, showSource: showSource, dim: true))
+        }
+        if let s = model.sysInterim {
+            out.append(TranscriptStyle.block(s, showSource: showSource, dim: true))
+        }
+        if out.length == 0 {
+            return NSAttributedString(
+                string: "대화가 시작되면 여기에 번역이 표시됩니다.",
+                attributes: [.foregroundColor: NSColor.tertiaryLabelColor,
+                             .font: NSFont.systemFont(ofSize: 13)])
+        }
+        return out
     }
 }
 
-private struct LineRow: View {
-    let line: Line
-    let showSource: Bool
-    let dim: Bool
+/// Attributed-string styling for one transcript line, mirroring the old
+/// SwiftUI row (ME/THEM color, source greyed, translation bold).
+enum TranscriptStyle {
+    static func block(_ line: Line, showSource: Bool, dim: Bool) -> NSAttributedString {
+        let isMic = line.stream == "mic"
+        let s = NSMutableAttributedString()
+        let labelColor = isMic ? NSColor.systemBlue : NSColor.systemGreen
+        let who = isMic ? "ME" : "THEM"
 
-    private var isMic: Bool { line.stream == "mic" }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            HStack(spacing: 6) {
-                // Speaker badge — always shown so a line is attributable even
-                // when "Show original" is off. ME = my mic, THEM = system audio.
-                Tag(text: isMic ? "ME" : "THEM")
-                    .foregroundStyle(isMic ? Color.blue : Color.green)
-                if showSource {
-                    Tag(text: line.src.uppercased())
-                    Text(line.source)
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            HStack(alignment: .top, spacing: 6) {
-                Tag(text: line.tgt.uppercased())
-                Text(line.translation.isEmpty ? "…" : line.translation)
-                    .font(.title3)
-                    .fontWeight(dim ? .regular : .semibold)
-            }
+        // Speaker + (optional) source line.
+        s.append(tag("\(who) ", color: labelColor))
+        if showSource {
+            s.append(tag("\(line.src.uppercased()) ", color: .secondaryLabelColor))
+            s.append(NSAttributedString(string: line.source, attributes: [
+                .font: NSFont.systemFont(ofSize: 12),
+                .foregroundColor: NSColor.secondaryLabelColor,
+            ]))
         }
-        .opacity(dim ? 0.55 : 1.0)
-        .padding(.vertical, 4)
-    }
-}
+        s.append(NSAttributedString(string: "\n"))
 
-private struct Tag: View {
-    let text: String
-    var body: some View {
-        Text(text)
-            .font(.caption2).monospaced()
-            .padding(.horizontal, 5).padding(.vertical, 1)
-            .background(.quaternary, in: RoundedRectangle(cornerRadius: 4))
+        // Translation line (bold, larger).
+        let transColor: NSColor = dim ? .secondaryLabelColor : .labelColor
+        s.append(tag("\(line.tgt.uppercased()) ", color: .secondaryLabelColor))
+        s.append(NSAttributedString(
+            string: (line.translation.isEmpty ? "…" : line.translation) + "\n\n",
+            attributes: [
+                .font: NSFont.systemFont(ofSize: 16,
+                                         weight: dim ? .regular : .semibold),
+                .foregroundColor: transColor,
+            ]))
+        return s
+    }
+
+    private static func tag(_ text: String, color: NSColor) -> NSAttributedString {
+        NSAttributedString(string: text, attributes: [
+            .font: NSFont.monospacedSystemFont(ofSize: 10, weight: .regular),
+            .foregroundColor: color,
+        ])
     }
 }

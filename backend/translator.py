@@ -204,10 +204,11 @@ _INSIGHT_SYSTEM = (
     "steer everything. If they say they are an interviewer focused on system "
     "design, your suggested questions must probe system-design depth — not "
     "generic small talk.\n"
-    "Reply to the user in the SAME LANGUAGE as their context text (default "
-    "Korean if ambiguous). Be concise and concrete; never invent facts not in "
-    "the transcript. Output ONLY a single JSON object, no markdown, no prose "
-    "around it."
+    "ALWAYS write your output in KOREAN (한국어), no matter what language the "
+    "transcript or the context is in. Every string value you emit (summary, "
+    "questions, key points, next actions) must be Korean.\n"
+    "Be concise and concrete; never invent facts not in the transcript. Output "
+    "ONLY a single JSON object, no markdown, no prose around it."
 )
 
 
@@ -235,7 +236,8 @@ def _insight_user_prompt(context: str, transcript_lines: list[str], mode: str) -
     return (
         f"=== USER CONTEXT (their role & goals) ===\n{ctx}\n\n"
         f"=== TRANSCRIPT (oldest first; 'ME' = the user, 'THEM' = the other side) ===\n"
-        f"{convo}\n\n=== TASK ===\n{shape}"
+        f"{convo}\n\n=== TASK ===\n{shape}\n\n"
+        "IMPORTANT: Write every value in KOREAN (한국어)."
     )
 
 

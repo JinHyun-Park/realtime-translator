@@ -329,23 +329,13 @@ struct InsightPanel: View {
                         if model.insightBusy { ProgressView().controlSize(.small) }
                     }
 
-                    // Live results
+                    // Live results — rendered as ONE selectable block so the
+                    // summary + all questions can be dragged/copied in one go.
                     if !model.liveSummary.isEmpty || !model.suggestedQuestions.isEmpty {
                         Divider()
-                        if !model.liveSummary.isEmpty {
-                            Text("지금까지 요약").font(.caption).foregroundStyle(.secondary)
-                            Text(model.liveSummary).font(.callout)
-                                .fixedSize(horizontal: false, vertical: true)
-                                .textSelection(.enabled)
-                        }
-                        if !model.suggestedQuestions.isEmpty {
-                            Text("추천 질문").font(.caption).foregroundStyle(.secondary).padding(.top, 2)
-                            ForEach(Array(model.suggestedQuestions.enumerated()), id: \.offset) { _, q in
-                                Label(q, systemImage: "questionmark.bubble")
-                                    .font(.callout).fixedSize(horizontal: false, vertical: true)
-                                    .textSelection(.enabled)
-                            }
-                        }
+                        SelectableText(attributed: liveResultAttributed())
+                            .frame(height: 150)
+                            .overlay(RoundedRectangle(cornerRadius: 5).stroke(.quaternary))
                     }
 
                     Divider()
@@ -356,29 +346,11 @@ struct InsightPanel: View {
                             .frame(maxWidth: .infinity)
                     }.controlSize(.regular).disabled(model.insightBusy)
 
-                    // Final wrap results
+                    // Final wrap — also one selectable block.
                     if !model.finalSummary.isEmpty || !model.keyPoints.isEmpty || !model.nextActions.isEmpty {
-                        if !model.finalSummary.isEmpty {
-                            Text("핵심 요약").font(.caption).foregroundStyle(.secondary).padding(.top, 2)
-                            Text(model.finalSummary).font(.callout)
-                                .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
-                        }
-                        if !model.keyPoints.isEmpty {
-                            Text("핵심 포인트").font(.caption).foregroundStyle(.secondary).padding(.top, 2)
-                            ForEach(Array(model.keyPoints.enumerated()), id: \.offset) { _, p in
-                                Label(p, systemImage: "circle.fill")
-                                    .font(.callout).fixedSize(horizontal: false, vertical: true)
-                                    .textSelection(.enabled)
-                            }
-                        }
-                        if !model.nextActions.isEmpty {
-                            Text("다음 액션").font(.caption).foregroundStyle(.secondary).padding(.top, 2)
-                            ForEach(Array(model.nextActions.enumerated()), id: \.offset) { _, a in
-                                Label(a, systemImage: "arrow.right.circle")
-                                    .font(.callout).fixedSize(horizontal: false, vertical: true)
-                                    .textSelection(.enabled)
-                            }
-                        }
+                        SelectableText(attributed: finalResultAttributed())
+                            .frame(height: 200)
+                            .overlay(RoundedRectangle(cornerRadius: 5).stroke(.quaternary))
                     }
 
                     if !model.insightStatus.isEmpty {
@@ -387,5 +359,59 @@ struct InsightPanel: View {
                 }
             }.padding(6)
         }
+    }
+
+    // Combine the live summary + questions into ONE attributed block so the
+    // whole thing is a single drag-selectable surface.
+    private func liveResultAttributed() -> NSAttributedString {
+        let s = NSMutableAttributedString()
+        if !model.liveSummary.isEmpty {
+            s.append(InsightStyle.heading("지금까지 요약"))
+            s.append(InsightStyle.body(model.liveSummary + "\n"))
+        }
+        if !model.suggestedQuestions.isEmpty {
+            s.append(InsightStyle.heading("추천 질문"))
+            for q in model.suggestedQuestions { s.append(InsightStyle.bullet(q, marker: "• ")) }
+        }
+        return s
+    }
+
+    private func finalResultAttributed() -> NSAttributedString {
+        let s = NSMutableAttributedString()
+        if !model.finalSummary.isEmpty {
+            s.append(InsightStyle.heading("핵심 요약"))
+            s.append(InsightStyle.body(model.finalSummary + "\n"))
+        }
+        if !model.keyPoints.isEmpty {
+            s.append(InsightStyle.heading("핵심 포인트"))
+            for p in model.keyPoints { s.append(InsightStyle.bullet(p, marker: "• ")) }
+        }
+        if !model.nextActions.isEmpty {
+            s.append(InsightStyle.heading("다음 액션"))
+            for a in model.nextActions { s.append(InsightStyle.bullet(a, marker: "→ ")) }
+        }
+        return s
+    }
+}
+
+/// Attributed-string styling for the insight blocks (headings, body, bullets).
+enum InsightStyle {
+    static func heading(_ t: String) -> NSAttributedString {
+        NSAttributedString(string: t + "\n", attributes: [
+            .font: NSFont.systemFont(ofSize: 11, weight: .semibold),
+            .foregroundColor: NSColor.secondaryLabelColor,
+        ])
+    }
+    static func body(_ t: String) -> NSAttributedString {
+        NSAttributedString(string: t, attributes: [
+            .font: NSFont.systemFont(ofSize: 13),
+            .foregroundColor: NSColor.labelColor,
+        ])
+    }
+    static func bullet(_ t: String, marker: String) -> NSAttributedString {
+        NSAttributedString(string: marker + t + "\n", attributes: [
+            .font: NSFont.systemFont(ofSize: 13),
+            .foregroundColor: NSColor.labelColor,
+        ])
     }
 }
