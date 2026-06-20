@@ -148,6 +148,27 @@ class Settings:
     # short — a couple hundred tokens is plenty.
     BEDROCK_MAX_TOKENS = _i("RT_BEDROCK_MAX_TOKENS", 512)
 
+    # --- Live insight (assistant-over-the-transcript) -------------------------
+    # A SEPARATE feature from translation: the app, when its insight toggle is
+    # ON, periodically POSTs the recent transcript + a free-text context (e.g.
+    # "I'm the interviewer, focus on system-design depth") to /insight and shows
+    # a rolling summary + suggested next questions, plus an end-of-meeting wrap
+    # (key points + next actions). This costs a Bedrock call ONLY while the
+    # toggle is on; off => the app never calls => zero added cost.
+    #
+    # How often the app asks for a live refresh (it batches every N new finals
+    # so cost stays bounded). This is the app's default; the app owns the timer.
+    INSIGHT_EVERY_N_FINALS = _i("RT_INSIGHT_EVERY_N_FINALS", 5)
+    # Output caps: the live refresh is short (a couple bullet points + 2-3
+    # questions); the final wrap is allowed more room (key points + next actions).
+    INSIGHT_LIVE_MAX_TOKENS = _i("RT_INSIGHT_LIVE_MAX_TOKENS", 700)
+    INSIGHT_FINAL_MAX_TOKENS = _i("RT_INSIGHT_FINAL_MAX_TOKENS", 1500)
+    # The transcript can grow unbounded; only the most recent N lines are sent on
+    # a live refresh (the running summary already carries earlier context). The
+    # final wrap sends more so nothing important is missed.
+    INSIGHT_LIVE_TRANSCRIPT_LINES = _i("RT_INSIGHT_LIVE_LINES", 40)
+    INSIGHT_FINAL_TRANSCRIPT_LINES = _i("RT_INSIGHT_FINAL_LINES", 400)
+
     @property
     def frame_bytes(self) -> int:
         # PCM16 mono => 2 bytes/sample

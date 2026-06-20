@@ -196,6 +196,37 @@ final class AppModel: ObservableObject {
     }
     @Published var endpointControlStatus = ""
 
+    // --- Live insight (meeting copilot over the transcript) -------------------
+    // SEPARATE from translation. When enabled, every N new finals the app POSTs
+    // the recent transcript + the user's free-text context to /insight and shows
+    // a rolling summary + suggested questions; a manual "wrap up" produces key
+    // points + next actions. OFF => the app never calls => zero added cost.
+    @Published var insightEnabled: Bool = (UserDefaults.standard.object(forKey: "insightEnabled") as? Bool ?? false) {
+        didSet { UserDefaults.standard.set(insightEnabled, forKey: "insightEnabled") }
+    }
+    // Free-text role/goals, e.g. "I'm the interviewer; probe system-design depth."
+    // Becomes part of the insight system prompt. Persisted across sessions.
+    @Published var insightContext: String = UserDefaults.standard.string(forKey: "insightContext") ?? "" {
+        didSet { UserDefaults.standard.set(insightContext, forKey: "insightContext") }
+    }
+    // Refresh cadence: ask for a live insight every this-many new finals.
+    @Published var insightEveryN: Int = (UserDefaults.standard.object(forKey: "insightEveryN") as? Int ?? 5) {
+        didSet { UserDefaults.standard.set(insightEveryN, forKey: "insightEveryN") }
+    }
+    // Live results (replaced each refresh).
+    @Published var liveSummary = ""
+    @Published var suggestedQuestions: [String] = []
+    // End-of-meeting wrap.
+    @Published var finalSummary = ""
+    @Published var keyPoints: [String] = []
+    @Published var nextActions: [String] = []
+    // UI feedback + in-flight guard so refreshes don't pile up.
+    @Published var insightStatus = ""
+    @Published var insightBusy = false
+    // Counts finals since the last live refresh; when it hits insightEveryN we
+    // fire a refresh and reset. Reset on Start so each meeting batches cleanly.
+    private var finalsSinceInsight = 0
+
     // Language pair (KO<->JA default). The relay auto-detects which side spoke.
     @Published var langA = "ko"
     @Published var langB = "ja"
@@ -622,6 +653,7 @@ final class AppModel: ObservableObject {
         status = "Listening…"
         serverPhase = .ready   // we're capturing; clear any wake-progress text
         wakeDetail = ""
+        finalsSinceInsight = 0   // batch insight refreshes fresh per meeting
         dbgTimer?.invalidate()
         dbgTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             Task { @MainActor in
@@ -760,6 +792,14 @@ final class AppModel: ObservableObject {
             if isNew, !line.translation.isEmpty {
                 autoSaver?.append(stream: stream, src: line.src, tgt: line.tgt,
                                   source: line.source, translation: line.translation)
+                // Live insight: count only genuinely new finals; every N, refresh.
+                if insightEnabled {
+                    finalsSinceInsight += 1
+                    if finalsSinceInsight >= max(1, insightEveryN) {
+                        finalsSinceInsight = 0
+                        requestInsight(mode: "live")
+                    }
+                }
             }
             if stream == "mic", micInterim?.id == uid { micInterim = nil }
             if stream == "system", sysInterim?.id == uid { sysInterim = nil }
@@ -784,6 +824,91 @@ final class AppModel: ObservableObject {
         NSWorkspace.shared.activateFileViewerSelecting(
             autosavePath.isEmpty ? [folder] : [URL(fileURLWithPath: autosavePath)])
     }
+
+    // MARK: - Live insight (meeting copilot)
+
+    /// Build speaker-labeled transcript lines (chronological) for the insight
+    /// call. We send the TRANSLATION (so a single-language model reads cleanly)
+    /// with the speaker tag, capped to the most recent `limit` lines.
+    private func transcriptLines(limit: Int) -> [String] {
+        let recent = lines.suffix(limit)
+        return recent.map { l in
+            let who = l.stream == "mic" ? "ME" : "THEM"
+            // Prefer the translation; fall back to source if translation empty.
+            let text = l.translation.isEmpty ? l.source : l.translation
+            return "\(who): \(text)"
+        }
+    }
+
+    /// POST the recent transcript + context to /insight and update the panel.
+    /// mode "live" -> rolling summary + suggested questions; "final" -> wrap with
+    /// key points + next actions. No-op (and no cost) unless the user invoked it.
+    func requestInsight(mode: String) {
+        guard !lines.isEmpty else {
+            if mode == "final" { insightStatus = "정리할 대화 내용이 없어요" }
+            return
+        }
+        // One in-flight at a time: drop a live refresh if one is running (a newer
+        // one will come), but always let a manual "final" through after it.
+        if insightBusy && mode == "live" { return }
+        let limit = mode == "final" ? 400 : 40
+        let payload: [String: Any] = [
+            "mode": mode,
+            "context": insightContext,
+            "transcript": transcriptLines(limit: limit),
+        ]
+        guard let base = httpBase(),
+              let body = try? JSONSerialization.data(withJSONObject: payload) else {
+            insightStatus = "요청 생성 실패"; return
+        }
+        var comp = URLComponents(url: base.appendingPathComponent("insight"),
+                                 resolvingAgainstBaseURL: false)
+        if !accessKey.isEmpty { comp?.queryItems = [URLQueryItem(name: "token", value: accessKey)] }
+        guard let url = comp?.url else { insightStatus = "URL 생성 실패"; return }
+        var req = URLRequest(url: url, timeoutInterval: 30)
+        req.httpMethod = "POST"
+        req.httpBody = body
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if !accessKey.isEmpty { req.setValue(accessKey, forHTTPHeaderField: "X-Wake-Token") }
+        insightBusy = true
+        insightStatus = mode == "final" ? "마무리 정리 중…" : "인사이트 갱신 중…"
+        rtlog("requestInsight mode=\(mode) lines=\(transcriptLines(limit: limit).count)")
+        Task { [weak self] in
+            defer { Task { @MainActor in self?.insightBusy = false } }
+            do {
+                let (data, resp) = try await URLSession.shared.data(for: req)
+                let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+                let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+                await MainActor.run {
+                    guard code == 200, let obj else {
+                        if code == 401 || code == 403 { self?.insightStatus = "비밀번호 오류" }
+                        else if code == 502 || code == 504 { self?.insightStatus = "서버 꺼져 있음" }
+                        else { self?.insightStatus = "인사이트 실패 (\(code))" }
+                        return
+                    }
+                    if let err = obj["error"] as? String {
+                        self?.insightStatus = "오류: \(err)"; return
+                    }
+                    if mode == "final" {
+                        self?.finalSummary = obj["summary"] as? String ?? ""
+                        self?.keyPoints = (obj["key_points"] as? [Any])?.compactMap { $0 as? String } ?? []
+                        self?.nextActions = (obj["next_actions"] as? [Any])?.compactMap { $0 as? String } ?? []
+                        self?.insightStatus = "정리 완료"
+                    } else {
+                        self?.liveSummary = obj["summary"] as? String ?? ""
+                        self?.suggestedQuestions = (obj["questions"] as? [Any])?.compactMap { $0 as? String } ?? []
+                        self?.insightStatus = "업데이트됨"
+                    }
+                }
+            } catch {
+                await MainActor.run { self?.insightStatus = "서버 응답 없음" }
+            }
+        }
+    }
+
+    /// Manual end-of-meeting wrap: produce the final summary + key points +
+    /// next actions from the whole transcript.
+    func finishAndSummarize() { requestInsight(mode: "final") }
 
     /// Render the full transcript as Markdown, labeled by speaker.
     func transcriptMarkdown() -> String {

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import collections
+import json
 import logging
 
 from openai import AsyncOpenAI
@@ -182,3 +183,114 @@ class Translator:
                     return None
                 await asyncio.sleep(0.3)
         return None
+
+
+# ---------------------------------------------------------------------------
+# Live insight (separate from translation): an assistant that reads the rolling
+# transcript + a user-supplied context and returns a short rolling summary +
+# suggested next questions ("live"), or an end-of-meeting wrap with key points
+# + next actions ("final"). One-shot and stateless — the app sends the recent
+# transcript each time, so this does NOT touch the per-connection Translator
+# state or the translation hot path. Bedrock Claude only; if it fails we surface
+# an error to the app rather than silently degrading (insight is opt-in, not
+# load-bearing like subtitles).
+# ---------------------------------------------------------------------------
+
+_INSIGHT_SYSTEM = (
+    "You are a real-time meeting copilot. You read a running, possibly bilingual "
+    "(Korean/Japanese/English) transcript of a live conversation and help the "
+    "user — whose ROLE AND GOALS are given below — stay on top of it.\n"
+    "The user's context defines who they are and what they care about; let it "
+    "steer everything. If they say they are an interviewer focused on system "
+    "design, your suggested questions must probe system-design depth — not "
+    "generic small talk.\n"
+    "Reply to the user in the SAME LANGUAGE as their context text (default "
+    "Korean if ambiguous). Be concise and concrete; never invent facts not in "
+    "the transcript. Output ONLY a single JSON object, no markdown, no prose "
+    "around it."
+)
+
+
+def _insight_user_prompt(context: str, transcript_lines: list[str], mode: str) -> str:
+    ctx = context.strip() or "(no specific context given — act as a neutral, helpful meeting assistant)"
+    convo = "\n".join(transcript_lines).strip() or "(transcript empty so far)"
+    if mode == "final":
+        shape = (
+            'Return JSON exactly: {"summary": string, "key_points": [string, ...], '
+            '"next_actions": [string, ...]}.\n'
+            "- summary: a tight paragraph of what the whole conversation covered.\n"
+            "- key_points: the most important takeaways (3-7 bullets).\n"
+            "- next_actions: concrete follow-up actions for the user given their role "
+            "(who does what next). Empty list if genuinely none."
+        )
+    else:
+        shape = (
+            'Return JSON exactly: {"summary": string, "questions": [string, ...]}.\n'
+            "- summary: 2-4 sentences capturing the conversation SO FAR (it will be "
+            "shown live and replaced on the next refresh, so make it self-contained).\n"
+            "- questions: 2-4 sharp questions the user should consider asking NEXT, "
+            "tailored to their role/goals and to what was just said. Empty list if "
+            "nothing useful to ask yet."
+        )
+    return (
+        f"=== USER CONTEXT (their role & goals) ===\n{ctx}\n\n"
+        f"=== TRANSCRIPT (oldest first; 'ME' = the user, 'THEM' = the other side) ===\n"
+        f"{convo}\n\n=== TASK ===\n{shape}"
+    )
+
+
+async def generate_insight(context: str, transcript_lines: list[str], mode: str) -> dict:
+    """One-shot Bedrock Claude call producing the insight JSON for `mode`
+    ("live" | "final"). Returns the parsed dict, or {"error": "..."} on failure
+    (the app shows the error; insight is opt-in so we don't fall back to Qwen)."""
+    from anthropic import AsyncAnthropicBedrock
+
+    max_tokens = (settings.INSIGHT_FINAL_MAX_TOKENS if mode == "final"
+                  else settings.INSIGHT_LIVE_MAX_TOKENS)
+    client = AsyncAnthropicBedrock(aws_region=settings.BEDROCK_REGION)
+    try:
+        resp = await client.messages.create(
+            model=settings.BEDROCK_MODEL,
+            max_tokens=max_tokens,
+            system=[{"type": "text", "text": _INSIGHT_SYSTEM}],
+            messages=[{"role": "user",
+                       "content": _insight_user_prompt(context, transcript_lines, mode)}],
+            timeout=settings.LLM_TIMEOUT,
+        )
+        text = "".join(b.text for b in resp.content
+                       if getattr(b, "type", None) == "text").strip()
+    except Exception as e:
+        log.warning("insight bedrock error: %s", e.__class__.__name__)
+        return {"error": f"insight failed: {e.__class__.__name__}"}
+
+    # Claude is told to emit pure JSON, but be defensive: strip ``` fences and
+    # grab the outermost {...} so a stray prefix doesn't break parsing.
+    return _parse_insight_json(text, mode)
+
+
+def _parse_insight_json(text: str, mode: str) -> dict:
+    s = text.strip()
+    if s.startswith("```"):
+        s = s.strip("`")
+        # drop an optional leading "json" language tag
+        if s[:4].lower() == "json":
+            s = s[4:]
+    a, b = s.find("{"), s.rfind("}")
+    if a != -1 and b != -1 and b > a:
+        s = s[a:b + 1]
+    try:
+        obj = json.loads(s)
+    except Exception:
+        log.warning("insight JSON parse failed; returning raw text")
+        return {"error": "could not parse insight", "raw": text[:500]}
+    # Normalize to the expected shape so the app can rely on the keys existing.
+    if mode == "final":
+        return {
+            "summary": str(obj.get("summary", "")),
+            "key_points": [str(x) for x in (obj.get("key_points") or [])],
+            "next_actions": [str(x) for x in (obj.get("next_actions") or [])],
+        }
+    return {
+        "summary": str(obj.get("summary", "")),
+        "questions": [str(x) for x in (obj.get("questions") or [])],
+    }

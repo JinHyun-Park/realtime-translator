@@ -383,9 +383,38 @@ async def _serve_http(port: int = 9000):
                     return True
         return False
 
+    async def _read_request(reader):
+        # Read headers, then (for POST /insight) the body per Content-Length.
+        # GET control endpoints have no body; /insight POSTs a JSON transcript
+        # that can be tens of KB, so the old flat 2048-byte read isn't enough.
+        head = b""
+        while b"\r\n\r\n" not in head and len(head) < 65536:
+            chunk = await reader.read(4096)
+            if not chunk:
+                break
+            head += chunk
+        header_blob, _, rest = head.partition(b"\r\n\r\n")
+        clen = 0
+        for line in header_blob.split(b"\r\n"):
+            if line.lower().startswith(b"content-length:"):
+                try:
+                    clen = int(line.split(b":", 1)[1].strip())
+                except ValueError:
+                    clen = 0
+                break
+        body = rest
+        # Cap total body to keep a hostile client from exhausting memory.
+        max_body = 2_000_000
+        while len(body) < min(clen, max_body):
+            chunk = await reader.read(min(65536, clen - len(body)))
+            if not chunk:
+                break
+            body += chunk
+        return header_blob, body
+
     async def cb(reader, writer):
         try:
-            req = await reader.read(2048)
+            req, http_body = await _read_request(reader)
             first = req.split(b"\r\n", 1)[0]
             raw = first.split(b" ")[1] if b" " in first else b"/"
             parsed = urlparse(raw.decode(errors="ignore"))
@@ -469,6 +498,37 @@ async def _serve_http(port: int = 9000):
                              IDLE["enabled"], IDLE["seconds"])
                     body = json.dumps({"ok": True, "enabled": IDLE["enabled"],
                                        "seconds": IDLE["seconds"]}).encode()
+                ctype = b"application/json"
+            elif path == b"/insight":
+                # Live meeting copilot (SEPARATE from translation). The app POSTs
+                # JSON {context, transcript:[lines], mode:"live"|"final"} only
+                # while its insight toggle is ON, so this costs a Bedrock call
+                # only on demand. Token-gated like the control endpoints.
+                if not _http_token_ok(qs, req):
+                    _reply(writer, b'{"error":"unauthorized"}',
+                           b"application/json", b"401 Unauthorized")
+                    await writer.drain()
+                    return
+                try:
+                    data = json.loads(http_body or b"{}")
+                except Exception:
+                    _reply(writer, b'{"error":"bad json"}',
+                           b"application/json", b"400 Bad Request")
+                    await writer.drain()
+                    return
+                mode = data.get("mode") if data.get("mode") in ("live", "final") else "live"
+                context = str(data.get("context", ""))
+                transcript = data.get("transcript") or []
+                if not isinstance(transcript, list):
+                    transcript = []
+                # Clamp line count server-side too (defense in depth; the app
+                # already trims). Keep the most RECENT lines.
+                cap = (settings.INSIGHT_FINAL_TRANSCRIPT_LINES if mode == "final"
+                       else settings.INSIGHT_LIVE_TRANSCRIPT_LINES)
+                lines = [str(x) for x in transcript][-cap:]
+                from translator import generate_insight
+                result = await generate_insight(context, lines, mode)
+                body = json.dumps({"mode": mode, **result}).encode()
                 ctype = b"application/json"
             else:  # /metrics or anything else
                 body = json.dumps(_metrics_snapshot()).encode()

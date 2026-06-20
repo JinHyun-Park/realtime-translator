@@ -164,6 +164,10 @@ struct ControlPanel: View {
                     }.padding(6)
                 }
 
+                // Live insight (meeting copilot over the transcript) — separate
+                // from translation; only calls the server while toggled ON.
+                InsightPanel()
+
                 // Languages
                 GroupBox("Languages") {
                     HStack(spacing: 8) {
@@ -277,6 +281,111 @@ struct StartControl: View {
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
+        }
+    }
+}
+
+/// Live insight panel: a meeting copilot that reads the rolling transcript plus
+/// a user-supplied context (role/goals) and shows a live summary + suggested
+/// questions, with a manual "wrap up" producing key points + next actions.
+/// Calls the server ONLY while the toggle is on, so it adds zero cost when off.
+struct InsightPanel: View {
+    @EnvironmentObject var model: AppModel
+
+    var body: some View {
+        GroupBox("라이브 인사이트 (회의 코파일럿)") {
+            VStack(alignment: .leading, spacing: 8) {
+                Toggle("실시간 인사이트 켜기", isOn: $model.insightEnabled)
+                Text(model.insightEnabled
+                     ? "대화가 쌓이면 요약·추천 질문을 자동 갱신해요 (Claude 호출, 켰을 때만 과금)."
+                     : "꺼져 있어요 — 서버를 호출하지 않아 추가 비용이 없습니다.")
+                    .font(.caption2).foregroundStyle(.secondary)
+
+                if model.insightEnabled {
+                    Divider()
+                    // Context: who am I, what to focus on. Feeds the system prompt.
+                    Text("컨텍스트 (내 역할·중점)").font(.caption).foregroundStyle(.secondary)
+                    TextEditor(text: $model.insightContext)
+                        .font(.callout)
+                        .frame(height: 56)
+                        .overlay(RoundedRectangle(cornerRadius: 5).stroke(.quaternary))
+                        .overlay(alignment: .topLeading) {
+                            if model.insightContext.isEmpty {
+                                Text("예: 나는 백엔드 시니어 면접관이다. 시스템 설계 깊이와 트레이드오프 사고를 본다.")
+                                    .font(.caption2).foregroundStyle(.tertiary)
+                                    .padding(.horizontal, 5).padding(.vertical, 8)
+                                    .allowsHitTesting(false)
+                            }
+                        }
+                    HStack {
+                        Text("갱신 주기").font(.caption)
+                        Picker("", selection: $model.insightEveryN) {
+                            Text("문장 3개").tag(3)
+                            Text("5개").tag(5)
+                            Text("8개").tag(8)
+                            Text("12개").tag(12)
+                        }.labelsHidden().frame(width: 100)
+                        Spacer()
+                        if model.insightBusy { ProgressView().controlSize(.small) }
+                    }
+
+                    // Live results
+                    if !model.liveSummary.isEmpty || !model.suggestedQuestions.isEmpty {
+                        Divider()
+                        if !model.liveSummary.isEmpty {
+                            Text("지금까지 요약").font(.caption).foregroundStyle(.secondary)
+                            Text(model.liveSummary).font(.callout)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .textSelection(.enabled)
+                        }
+                        if !model.suggestedQuestions.isEmpty {
+                            Text("추천 질문").font(.caption).foregroundStyle(.secondary).padding(.top, 2)
+                            ForEach(Array(model.suggestedQuestions.enumerated()), id: \.offset) { _, q in
+                                Label(q, systemImage: "questionmark.bubble")
+                                    .font(.callout).fixedSize(horizontal: false, vertical: true)
+                                    .textSelection(.enabled)
+                            }
+                        }
+                    }
+
+                    Divider()
+                    Button {
+                        model.finishAndSummarize()
+                    } label: {
+                        Label("마무리 정리 (핵심 + 다음 액션)", systemImage: "checkmark.seal")
+                            .frame(maxWidth: .infinity)
+                    }.controlSize(.regular).disabled(model.insightBusy)
+
+                    // Final wrap results
+                    if !model.finalSummary.isEmpty || !model.keyPoints.isEmpty || !model.nextActions.isEmpty {
+                        if !model.finalSummary.isEmpty {
+                            Text("핵심 요약").font(.caption).foregroundStyle(.secondary).padding(.top, 2)
+                            Text(model.finalSummary).font(.callout)
+                                .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+                        }
+                        if !model.keyPoints.isEmpty {
+                            Text("핵심 포인트").font(.caption).foregroundStyle(.secondary).padding(.top, 2)
+                            ForEach(Array(model.keyPoints.enumerated()), id: \.offset) { _, p in
+                                Label(p, systemImage: "circle.fill")
+                                    .font(.callout).fixedSize(horizontal: false, vertical: true)
+                                    .textSelection(.enabled)
+                            }
+                        }
+                        if !model.nextActions.isEmpty {
+                            Text("다음 액션").font(.caption).foregroundStyle(.secondary).padding(.top, 2)
+                            ForEach(Array(model.nextActions.enumerated()), id: \.offset) { _, a in
+                                Label(a, systemImage: "arrow.right.circle")
+                                    .font(.callout).fixedSize(horizontal: false, vertical: true)
+                                    .textSelection(.enabled)
+                            }
+                        }
+                    }
+
+                    if !model.insightStatus.isEmpty {
+                        Text(model.insightStatus).font(.caption2).foregroundStyle(.secondary)
+                    }
+                }
+            }.padding(6)
         }
     }
 }
