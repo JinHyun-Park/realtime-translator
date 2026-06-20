@@ -17,9 +17,11 @@ is also supported, and any pair works as long as the models do.
                                               └─ fan-out ─▶ N browser viewers (/view)  ← broadcast mode
 ```
 
-- **No paid hosted API.** OpenAI Realtime / Gemini Live are closed APIs — you can't
-  put *their* model on *your* server. This hosts the strongest **open** stack instead,
-  so all audio stays on infrastructure you control.
+- **No paid hosted API required.** OpenAI Realtime / Gemini Live are closed APIs — you
+  can't put *their* model on *your* server. This hosts the strongest **open** stack
+  (Qwen3) instead, so all audio stays on infrastructure you control. (Optionally, you can
+  flip translation to **Claude Sonnet 4.6 on Bedrock** for higher accuracy — still in
+  *your* AWS account.)
 - **No mid-sentence cutting.** The classic "translation chops my sentence in half"
   problem is an **endpointing/VAD** problem, not a model one — solved here (see below).
 - **Cost-guarded personal server.** The GPU box **auto-stops when idle** and the app
@@ -32,6 +34,7 @@ is also supported, and any pair works as long as the models do.
 - [How it works](#how-it-works)
 - [The "sentences get cut in half" problem](#the-sentences-get-cut-in-half-problem--solved-here)
 - [Using the Mac app](#using-the-mac-app)
+- [Live insight (meeting copilot)](#live-insight-meeting-copilot)
 - [Broadcast mode (team viewing)](#broadcast-mode-team-viewing)
 - [Personal always-available server (auto-stop + wake)](#personal-always-available-server-auto-stop--wake)
 - [Quick start (local, no cloud)](#quick-start-local-no-cloud)
@@ -49,8 +52,9 @@ is also supported, and any pair works as long as the models do.
 |---|---|
 | **Capture** | System audio **and** mic, as **two independent streams** (mixing them wrecked recognition). Mic = "🎙 Me", system = "🔊 Them", tagged in the UI. |
 | **ASR** | `faster-whisper large-v3` on GPU; CPU `small`/`base` for local demo. |
-| **Translation** | `Qwen3-32B-AWQ` via vLLM (OpenAI-compatible). Carries the last few sentences as **context** so pronouns/topic stay coherent. |
-| **Anti-cut** | VAD endpointing waits for a real pause before locking a sentence; a live grey **interim** line updates as you speak, then commits to a solid **final**. |
+| **Translation** | `Qwen3-32B-AWQ` via vLLM (free/offline), **or** `Claude Sonnet 4.6` on Amazon Bedrock (higher accuracy) — toggle live in the app. On a Bedrock throttle it auto-falls-back to Qwen for that call so subtitles never blank. Carries the last few sentences as **context** so pronouns/topic stay coherent. |
+| **Anti-cut** | VAD endpointing waits for a real pause before locking a sentence; punctuation/sentence-ending early-finalize keeps long monologues breaking per sentence; an **English-target gate** keeps SVO clauses whole. A live grey **interim** line updates as you speak, then commits to a solid **final**. All tunable live from the app. |
+| **Live insight (copilot)** | An opt-in panel that reads the rolling transcript + your free-text **context** ("I'm the interviewer, focus on system-design depth") and shows a **live summary + suggested next questions**, plus a one-tap **wrap-up** (key points + next actions). Toggle off ⇒ no calls ⇒ zero added cost. |
 | **Broadcast** | One capturer → relay translates **once** → **N browser viewers** watch subtitles at `/view` (no app, no permissions, just a URL + password). |
 | **Auth** | Single shared password (token). Required on every connection — capture app and viewers alike. |
 | **Auto-save** | Every finalized line is written to `~/Documents/RealtimeTranslator/transcript-*.md` the instant it arrives — quit/crash never loses the transcript. |
@@ -78,16 +82,31 @@ is also supported, and any pair works as long as the models do.
 
 This is an **endpointing/VAD** problem, not a model problem. The relay listens
 **longer** before deciding a sentence ended, and re-translates as more audio arrives.
-The main dial is `RT_MIN_SILENCE_MS` — raise it if sentences still split.
+Three mechanisms work together (all live-tunable from the app, no redeploy):
 
-| Knob | Default (Tokyo) | Effect |
+1. **Silence endpointing** — a sentence locks only after a real pause (`RT_MIN_SILENCE_MS`).
+2. **Punctuation / sentence-ending early-finalize** — if the interim transcription
+   ends a sentence (Whisper punctuation, or a KO/JA sentence-final ending) *and* there's
+   a tiny breath, finalize now — so a 1–2 min monologue still breaks per sentence
+   instead of waiting out the pause.
+3. **English-target gate** — KO/JA are SOV, so cutting at a mid-utterance breath is
+   harmless; English (SVO) reordering can't cross a wrong cut, so a half sentence
+   becomes a dangling phrase. When the pair involves **English**, a bare pause does
+   **not** finalize — only a complete sentence (or the max-segment net) does, keeping
+   the clause whole. KO↔JA is unaffected (stays snappy). Toggleable per session.
+
+| Knob | Default | Effect |
 |---|---|---|
-| `RT_MIN_SILENCE_MS` | `1000` | **The main one.** Pause length required to *lock* a sentence. Raise to 1100–1300 if it still splits; short "음…"/comma pauses won't finalize. |
-| `RT_MAX_SEGMENT_MS` | `15000` | Safety flush for a non-stop talker. |
+| `RT_MIN_SILENCE_MS` | `650` | **The main one.** Pause length required to *lock* a sentence. Raise if it still splits; short "음…"/comma pauses won't finalize. Live: the app's "문장 끊기" slider. |
+| `RT_MAX_SEGMENT_MS` | `8000` | Safety flush for a non-stop talker. |
+| `RT_PUNCT_ENDPOINT` / `RT_PUNCT_SILENCE_MS` | `1` / `300` | Punctuation-aware early finalize on/off, and the tiny pause required to confirm it. |
+| `RT_EN_SENTENCE_GATE` | `1` | English-target gate (keep SVO clauses whole). |
 | `RT_PREROLL_MS` | `300` | Audio kept *before* speech onset so the first syllable isn't clipped. |
 | `RT_MIN_SPEECH_MS` | `300` | Ignore coughs/blips below this. |
-| `RT_INTERIM_INTERVAL_MS` | `700` | How often the grey in-progress line refreshes. |
+| `RT_INTERIM_INTERVAL_MS` | `1000` | How often the grey in-progress line refreshes. |
 | `RT_VAD_AGGRESSIVENESS` | `2` | webrtcvad 0–3; higher = calls quiet bits silence sooner. |
+
+> The relay also exposes a live control endpoint `GET /control/endpoint?silence_ms=&max_ms=&punct=&punct_ms=&en_gate=` (token-gated) that the app's sliders/toggles drive — change behavior mid-meeting without a redeploy.
 
 ---
 
@@ -110,6 +129,43 @@ The main dial is `RT_MIN_SILENCE_MS` — raise it if sentences still split.
 > **Build/sign:** `mac-app/bundle.sh` builds a signed `.app`. It signs with a stable
 > *Apple Development* identity so the code hash stays constant across rebuilds —
 > otherwise macOS resets your Mic/Screen-Recording grants on every build.
+
+**Live controls** (no redeploy — they hit token-gated `/control/*` endpoints):
+- **자동 끄기 (cost guard):** toggle idle auto-stop, change the timeout, or "지금 서버 끄기" to stop the box immediately.
+- **번역 모델:** switch translation between local **Qwen** and **Claude Sonnet 4.6 (Bedrock)**.
+- **문장 끊기:** a silence-sensitivity slider + punctuation-early-finalize toggle (see anti-cut above).
+- **라이브 인사이트:** the meeting-copilot panel (next section).
+
+All of these re-apply automatically after a wake (the box resets to env defaults on stop/start).
+
+---
+
+## Live insight (meeting copilot)
+
+An **opt-in** assistant that reads the running transcript and helps you act on it in
+real time — separate from translation, and **billed only while it's on**.
+
+1. Turn on **"라이브 인사이트 켜기"** in the app.
+2. Type your **context** — who you are and what you care about, e.g.
+   *"나는 백엔드 시니어 면접관이다. 시스템 설계 깊이와 트레이드오프 사고를 본다."*
+   This becomes part of the system prompt, so the output is tailored to your role.
+3. As the conversation accumulates, every **N finals** (3/5/8/12, your choice) the app
+   posts the recent transcript + context to the relay and updates a **live summary +
+   suggested next questions** — tailored to your context (an interviewer gets
+   system-design probes, not small talk).
+4. Press **"마무리 정리"** any time for an end-of-meeting wrap: **key points + next
+   actions**.
+
+- **Model:** Claude Sonnet 4.6 on Bedrock. Output is always in **Korean**, regardless of
+  the transcript's language.
+- **Cost:** the toggle OFF means the app makes **no calls at all** — zero added cost. ON,
+  it batches every N sentences and sends only recent lines, so calls stay small and
+  predictable. (The GPU box cost is unchanged either way — only Bedrock calls are added,
+  and only on demand.)
+- **Privacy:** the transcript is sent to Bedrock in your account/region (`ap-northeast-1`)
+  using the box's IAM role — no third-party API.
+- Server side: token-gated `POST /insight` with `{context, transcript, mode:"live"|"final"}`;
+  see `backend/translator.py` (`generate_insight`). Tunable via `RT_INSIGHT_*` env knobs.
 
 ---
 
@@ -212,6 +268,14 @@ What `launch.sh` builds:
 > **GPU memory:** single-GPU box uses `--gpu-memory-utilization 0.78` (whisper shares the
 > card with vLLM); multi-GPU uses `0.90` (vLLM gets GPU0 to itself). Auto-detected.
 
+> **CloudFront routing (important):** the distribution's *default* origin is the WebSocket
+> relay (`:8765`). The HTTP control/insight/health paths must each have a behavior pointing
+> at the **HTTP origin (`:9000`)** — i.e. `/healthz*`, `/control*`, `/metrics*`, `/insight*`
+> (plus `/view*`, `/wake*`). If `/control*` or `/insight*` is missing, those requests fall
+> through to the WS origin and the app's controls/insight **silently fail with HTTP 426**.
+> All of these forward query strings + the `X-Wake-Token` header (managed *AllViewerExceptHostHeader*
+> origin-request policy) and disable caching.
+
 ---
 
 ## Deploying to *your own* AWS account
@@ -245,11 +309,21 @@ All knobs are env-overridable so the **same code** runs locally and in Tokyo
 for ready-to-copy sets. Highlights:
 
 - **Endpointing:** `RT_MIN_SILENCE_MS`, `RT_MAX_SEGMENT_MS`, `RT_PREROLL_MS`,
-  `RT_VAD_AGGRESSIVENESS`, `RT_INTERIM_INTERVAL_MS`, `RT_INTERIM_WINDOW_MS`.
+  `RT_VAD_AGGRESSIVENESS`, `RT_INTERIM_INTERVAL_MS`, `RT_INTERIM_WINDOW_MS`,
+  `RT_PUNCT_ENDPOINT`, `RT_PUNCT_SILENCE_MS`, `RT_EN_SENTENCE_GATE`.
 - **ASR:** `RT_ASR_MODEL`, `RT_ASR_DEVICE`, `RT_ASR_COMPUTE`, `RT_ASR_WORKERS`, `RT_ASR_NUM_GPUS`.
 - **Translation:** `RT_LLM_BASE_URL`, `RT_LLM_MODEL`, `RT_LLM_TEMPERATURE`, `RT_CONTEXT_WINDOW`.
+- **Translation provider (Bedrock):** `RT_LLM_PROVIDER` (`vllm` | `bedrock`), `RT_BEDROCK_MODEL`
+  (default `global.anthropic.claude-sonnet-4-6` — Sonnet 4.6 has **no `apac.` profile**, use
+  `global.` or `jp.` in Tokyo), `RT_BEDROCK_REGION`, `RT_BEDROCK_MAX_TOKENS`.
+- **Live insight:** `RT_INSIGHT_EVERY_N_FINALS`, `RT_INSIGHT_LIVE_MAX_TOKENS`,
+  `RT_INSIGHT_FINAL_MAX_TOKENS`, `RT_INSIGHT_LIVE_LINES`, `RT_INSIGHT_FINAL_LINES`.
 - **Auth:** `RT_RELAY_TOKEN` (empty = open dev relay).
 - **Cost guard:** `RT_IDLE_STOP_S`, `RT_IDLE_GRACE_S`, `RT_IDLE_STOP_ENABLED`, `RT_IDLE_CHECK_S`.
+
+> **Bedrock translation/insight needs IAM perms** — the EC2 role must allow `bedrock:InvokeModel`
+> on the Claude Sonnet 4.6 model + inference profile (see `deploy/bedrock-policy.json`), and
+> `anthropic[bedrock]` must be installed (it's in `requirements.txt`).
 
 ---
 
@@ -258,11 +332,14 @@ for ready-to-copy sets. Highlights:
 ```
 backend/
   server.py          WebSocket relay (asyncio + websockets); auth, broadcast,
-                     /healthz, idle self-stop, vLLM health watchdog
-  segmenter.py       VAD endpointing — the anti-cut logic
+                     /healthz, /control/* live knobs, /insight, idle self-stop,
+                     vLLM health watchdog
+  segmenter.py       VAD endpointing — anti-cut logic (silence + punctuation + EN gate)
   asr.py             faster-whisper wrapper (multi-GPU via device_index)
-  translator.py      OpenAI-compatible LLM translation + context window
+  translator.py      Qwen (vLLM) + Claude (Bedrock) translation w/ fallback,
+                     context window, and generate_insight() (meeting copilot)
   config.py          all tunable knobs (env-overridable)
+  test_en_gate.py    offline unit tests for the segmenter (faked VAD)
   viewer.html        broadcast viewer page (vanilla JS, served at /view)
   run_local.sh       one-shot local launcher
   deploy_tokyo.md    GPU deploy notes
@@ -275,12 +352,16 @@ deploy/
   connect.sh         self-healing SSM port-forward supervisor (local dev)
   teardown.sh        stop / terminate the box
   cloudfront-teardown.sh   delete the CloudFront distribution + close the SG
+  bedrock-policy.json      IAM policy for Claude Sonnet 4.6 (translation + insight)
 mac-app/
   Sources/RealtimeTranslator/
     Audio/           Resampler, Mixer, SystemAudioCapture, MicCapture, AudioDevices
     Net/             RelayClient (WebSocket)
-    Views/           ContentView (controls + Wake/Start), TranscriptView (live subtitles)
-    AppModel.swift   main view model (capture, wake, readiness, autosave)
+    Views/           ContentView (controls + Wake/Start + insight panel),
+                     TranscriptView (live subtitles), SelectableText (NSTextView
+                     wrapper for whole-area drag-select)
+    AppModel.swift   main view model (capture, wake, readiness, autosave,
+                     live controls, insight requests)
     main.swift       app entry
   bundle.sh          build + wrap into a signed .app (required for permissions)
   package-dmg.sh     wrap into a .dmg for distribution
