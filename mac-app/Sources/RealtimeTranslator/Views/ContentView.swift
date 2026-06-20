@@ -69,48 +69,10 @@ struct ControlPanel: View {
                     }.padding(6)
                 }
 
-                // Auto-stop (GPU cost guard) — turn it off so the box stays up,
-                // change the timeout, or stop the box right now.
-                GroupBox("자동 끄기 (비용 절감)") {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Toggle("유휴 시 자동으로 끄기", isOn: $model.autoStopEnabled)
-                            .onChange(of: model.autoStopEnabled) { _ in
-                                model.applyIdleSetting()
-                            }
-                        HStack {
-                            Text("끄기까지").font(.caption)
-                            Picker("", selection: $model.idleStopMinutes) {
-                                Text("10분").tag(10)
-                                Text("15분").tag(15)
-                                Text("30분").tag(30)
-                                Text("60분").tag(60)
-                            }
-                            .labelsHidden()
-                            .frame(width: 90)
-                            .disabled(!model.autoStopEnabled)
-                            .onChange(of: model.idleStopMinutes) { _ in
-                                model.applyIdleSetting()
-                            }
-                            Spacer()
-                        }
-                        Text(model.autoStopEnabled
-                             ? "회의 중엔 안 꺼져요 (캡처 중엔 유휴 아님). 보기만 하는 뷰어는 카운트 안 함."
-                             : "⚠️ 자동으로 안 꺼집니다 — 다 쓰면 아래 '지금 끄기'로 직접 끄세요 (과금 계속됨).")
-                            .font(.caption2).foregroundStyle(.secondary)
-                        Divider()
-                        Button(role: .destructive) {
-                            model.stopServerNow()
-                        } label: {
-                            Label("지금 서버 끄기", systemImage: "stop.circle")
-                                .frame(maxWidth: .infinity)
-                        }
-                        .controlSize(.regular)
-                        if !model.idleControlStatus.isEmpty {
-                            Text(model.idleControlStatus)
-                                .font(.caption2).foregroundStyle(.secondary)
-                        }
-                    }.padding(6)
-                }
+                // (Removed the "auto-stop / stop server now" panel: this box is a
+                // SHARED relay meant to stay always-on, so the app no longer lets a
+                // user stop it or toggle idle-shutdown. The server keeps idle-stop
+                // OFF; cost is managed out-of-band by the operator.)
 
                 // Translation model — local Qwen vs Claude Sonnet 4.6 (Bedrock).
                 GroupBox("번역 모델") {

@@ -188,20 +188,12 @@ final class AppModel: ObservableObject {
     private var wakeStartedAt: Date?
     private var wakeTask: Task<Void, Never>?
 
-    // --- Auto-stop (GPU cost guard) controls, mirrored to the server ---
-    // The box self-stops after idleStopMinutes of zero capture UNLESS
-    // autoStopEnabled is off. Persisted so the choice survives app restarts,
-    // and re-pushed to the box on every wake (a stop/start resets the server to
-    // its env defaults). autoStopApplied tracks whether the live box has our
-    // current setting yet (for UI + to re-apply after wake).
-    @Published var autoStopEnabled: Bool = (UserDefaults.standard.object(forKey: "autoStopEnabled") as? Bool ?? true) {
-        didSet { UserDefaults.standard.set(autoStopEnabled, forKey: "autoStopEnabled") }
-    }
-    @Published var idleStopMinutes: Int = (UserDefaults.standard.object(forKey: "idleStopMinutes") as? Int ?? 15) {
-        didSet { UserDefaults.standard.set(idleStopMinutes, forKey: "idleStopMinutes") }
-    }
-    // Transient UI feedback for the control buttons (e.g. "자동끔 OFF 적용됨").
-    @Published var idleControlStatus = ""
+    // --- Idle auto-stop: DISABLED from the app side ---
+    // This is a SHARED relay meant to stay always-on, so the app no longer lets
+    // a user stop the box or toggle idle-shutdown (the UI panel was removed).
+    // On every wake we push idle-stop OFF so a server-side env default can't
+    // silently start shutting the shared box down under people. (The operator
+    // manages cost out-of-band.)
 
     // --- Translation model: local Qwen vs Claude Sonnet 4.6 (Bedrock) ---
     // useClaude=true routes translation to Claude on Bedrock (higher accuracy,
@@ -412,40 +404,17 @@ final class AppModel: ObservableObject {
         return comp?.url
     }
 
-    /// Push the current auto-stop preference (enabled + minutes) to the live box.
-    /// Called from the toggle/buttons and automatically right after a wake (the
-    /// server resets to env defaults on every stop/start, so we re-assert).
-    func applyIdleSetting() {
-        let enabled = autoStopEnabled
-        let seconds = max(1, idleStopMinutes) * 60
+    /// Keep the shared box always-on: push idle-stop OFF on every wake so a
+    /// server-side env default can't start shutting it down under other users.
+    /// (No UI — the auto-stop / stop-now panel was removed for the shared relay.)
+    func disableIdleStop() {
         guard let url = controlURL("control/idle", [
-            URLQueryItem(name: "enabled", value: enabled ? "1" : "0"),
-            URLQueryItem(name: "seconds", value: String(seconds)),
-        ]) else { idleControlStatus = "서버 주소 오류"; return }
+            URLQueryItem(name: "enabled", value: "0"),
+        ]) else { return }
         var req = URLRequest(url: url, timeoutInterval: 10)
         if !accessKey.isEmpty { req.setValue(accessKey, forHTTPHeaderField: "X-Wake-Token") }
-        rtlog("applyIdleSetting enabled=\(enabled) seconds=\(seconds)")
-        Task { [weak self] in
-            do {
-                let (_, resp) = try await URLSession.shared.data(for: req)
-                let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
-                await MainActor.run {
-                    if code == 401 || code == 403 {
-                        self?.idleControlStatus = "비밀번호 오류 — 설정 미적용"
-                    } else if code == 200 {
-                        self?.idleControlStatus = enabled
-                            ? "자동끔 ON (\(self?.idleStopMinutes ?? 0)분)"
-                            : "자동끔 OFF — 수동으로 끌 때까지 안 꺼짐"
-                    } else if code == 502 || code == 504 {
-                        self?.idleControlStatus = "서버 꺼져 있음 — 깨운 뒤 자동 적용"
-                    } else {
-                        self?.idleControlStatus = "적용 실패 (\(code))"
-                    }
-                }
-            } catch {
-                await MainActor.run { self?.idleControlStatus = "서버 응답 없음 (꺼져 있을 수 있음)" }
-            }
-        }
+        rtlog("disableIdleStop (shared box stays always-on)")
+        Task { _ = try? await URLSession.shared.data(for: req) }
     }
 
     /// Push the translation-model choice (Qwen vs Claude) to the live box.
@@ -521,36 +490,9 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Manual kill switch: stop the GPU box right now, regardless of auto-stop.
-    /// Use after a meeting to stop paying immediately instead of waiting out the
-    /// idle timer. If capture is running we stop it first (clean shutdown).
-    func stopServerNow() {
-        if running { stop() }
-        guard let url = controlURL("control/stop", []) else {
-            idleControlStatus = "서버 주소 오류"; return
-        }
-        var req = URLRequest(url: url, timeoutInterval: 10)
-        if !accessKey.isEmpty { req.setValue(accessKey, forHTTPHeaderField: "X-Wake-Token") }
-        rtlog("stopServerNow")
-        idleControlStatus = "서버 끄는 중…"
-        Task { [weak self] in
-            do {
-                let (_, resp) = try await URLSession.shared.data(for: req)
-                let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
-                await MainActor.run {
-                    switch code {
-                    case 200:        self?.idleControlStatus = "서버 끄는 중 — 과금 곧 멈춤"
-                    case 401, 403:   self?.idleControlStatus = "비밀번호 오류 — 못 껐어요"
-                    case 502, 504:   self?.idleControlStatus = "이미 꺼져 있어요"
-                    default:         self?.idleControlStatus = "끄기 실패 (\(code))"
-                    }
-                    self?.serverPhase = .idle
-                }
-            } catch {
-                await MainActor.run { self?.idleControlStatus = "이미 꺼져 있거나 응답 없음" }
-            }
-        }
-    }
+    // (Removed stopServerNow(): this is a shared always-on relay, so the app no
+    // longer exposes a way to stop the box. The server's /control/stop endpoint
+    // still exists for the operator if ever needed.)
 
     /// One-tap: wake the box (if asleep), wait until /healthz says ready, then
     /// auto-press Start. Safe to call when already up — /healthz returns ready
@@ -661,10 +603,10 @@ final class AppModel: ObservableObject {
         wakeDetail = "준비 완료 — 시작합니다"
         wakeTask = nil
         notifyReady()
-        // The box just (re)booted, so its auto-stop, translation-model choice AND
-        // sentence-endpointing knobs are back at the env defaults. Re-assert all
-        // saved preferences now.
-        applyIdleSetting()
+        // The box just (re)booted, so its translation-model choice and
+        // sentence-endpointing knobs are back at the env defaults. Re-assert the
+        // saved preferences, and force idle-stop OFF (shared box stays always-on).
+        disableIdleStop()
         applyLLMSetting()
         applyEndpointSetting()
         // Auto-press Start so one tap = end-to-end. If the user already pressed
