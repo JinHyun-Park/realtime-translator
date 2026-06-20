@@ -40,7 +40,13 @@ struct ControlPanel: View {
                                 .textFieldStyle(.roundedBorder)
                                 .disabled(model.running)
                         }
-                        Text("같은 서버를 여러 명이 써도 '방'이 다르면 자막이 격리돼요. 함께 보려면 같은 방으로 맞추세요.")
+                        HStack(spacing: 6) {
+                            Text("방 비번").font(.caption).foregroundStyle(.secondary)
+                            SecureField("선택 (비우면 공개 방)", text: $model.roomSecret)
+                                .textFieldStyle(.roundedBorder)
+                                .disabled(model.running)
+                        }
+                        Text("같은 서버를 여러 명이 써도 '방'이 다르면 자막이 격리돼요. 함께 보려면 같은 방+방비번으로 맞추세요. 방 비번을 처음 설정한 사람이 그 방 주인이 됩니다.")
                             .font(.caption2).foregroundStyle(.secondary)
                         HStack {
                             Circle()

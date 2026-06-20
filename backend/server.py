@@ -186,6 +186,15 @@ def _ws_room(ws) -> str:
         return DEFAULT_ROOM
 
 
+def _ws_room_secret(ws) -> str:
+    # Optional per-room secret from ?rs=... (opt-in room privacy). Empty if none.
+    from urllib.parse import urlparse, parse_qs
+    try:
+        return (parse_qs(urlparse(_ws_path(ws)).query).get("rs") or [""])[0]
+    except Exception:
+        return ""
+
+
 def _is_viewer(ws) -> bool:
     # CloudFront forwards the path; viewers connect to /viewsock (capture uses /).
     path = _ws_path(ws).split("?", 1)[0]
@@ -230,6 +239,15 @@ async def handle(ws):
             log.warning("unauthorized connection rejected: %s",
                         getattr(ws, "remote_address", "?"))
             await ws.close(code=4401, reason="unauthorized")
+            return
+        # Per-room secret gate (opt-in): a locked room requires a matching ?rs=.
+        # An unlocked room is open; offering a secret to an unclaimed room claims
+        # it. Both captures and viewers must pass.
+        from room_auth import check_access
+        if not await check_access(_ws_room(ws), _ws_room_secret(ws)):
+            log.warning("room secret mismatch: room=%s peer=%s",
+                        _ws_room(ws), getattr(ws, "remote_address", "?"))
+            await ws.close(code=4403, reason="room locked")
             return
         if _is_viewer(ws):
             await _handle_viewer(ws)
@@ -590,6 +608,22 @@ async def _serve_http(port: int = 9000):
                     "vllm_up": METRICS["vllm_up"],
                     "ready": bool(METRICS["vllm_up"] and ASR is not None),
                 }).encode()
+                ctype = b"application/json"
+            elif path == b"/control/room-secret":
+                # Set/rotate a room's secret (opt-in room privacy). Requires the
+                # relay token (box entry) AND the room's CURRENT secret (?current=)
+                # unless the room is unclaimed. Params: room, current, new.
+                if not _http_token_ok(qs, req):
+                    _reply(writer, b'{"ok":false,"error":"unauthorized"}',
+                           b"application/json", b"401 Unauthorized")
+                    await writer.drain(); return
+                room = (qs.get("room") or [DEFAULT_ROOM])[0].strip() or DEFAULT_ROOM
+                current = (qs.get("current") or [""])[0]
+                new_secret = (qs.get("new") or [""])[0]
+                from room_auth import change_secret
+                ok = await change_secret(room, current, new_secret)
+                body = json.dumps({"ok": ok, "room": room,
+                                   "error": None if ok else "wrong current secret or empty new"}).encode()
                 ctype = b"application/json"
             elif path in (b"/control/idle", b"/control/stop", b"/control/llm",
                           b"/control/endpoint"):

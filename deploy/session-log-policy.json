@@ -2,20 +2,23 @@
   "Version": "2012-10-17",
   "Statement": [
     {
-      "Sid": "SessionLogObjectRW",
+      "Sid": "RelayStateObjectRW",
       "Effect": "Allow",
       "Action": [
         "s3:GetObject",
         "s3:PutObject"
       ],
-      "Resource": "arn:aws:s3:::rt-translator-deploy-579815401013-ap-northeast-1/sessions/*"
+      "Resource": [
+        "arn:aws:s3:::rt-translator-deploy-579815401013-ap-northeast-1/sessions/*",
+        "arn:aws:s3:::rt-translator-deploy-579815401013-ap-northeast-1/rooms/*"
+      ]
     },
     {
-      "Sid": "SessionLogList",
+      "Sid": "RelayStateList",
       "Effect": "Allow",
       "Action": "s3:ListBucket",
       "Resource": "arn:aws:s3:::rt-translator-deploy-579815401013-ap-northeast-1",
-      "Condition": { "StringLike": { "s3:prefix": "sessions/*" } }
+      "Condition": { "StringLike": { "s3:prefix": ["sessions/*", "rooms/*"] } }
     }
   ]
 }

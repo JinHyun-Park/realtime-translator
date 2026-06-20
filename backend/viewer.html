@@ -51,11 +51,17 @@
   // Room/meeting id from ?room=... — must match the capture's room to receive
   // its subtitles (concurrent meetings on one box are isolated by room).
   var rtRoom = new URLSearchParams(location.search).get("room") || "default";
+  // Optional per-room secret (?rs=) for locked rooms; saved like the password.
+  var rtSecret = new URLSearchParams(location.search).get("rs");
+  if (rtSecret) { try { localStorage.setItem("rtSecret:"+rtRoom, rtSecret); } catch(e){} }
+  else { try { rtSecret = localStorage.getItem("rtSecret:"+rtRoom) || ""; } catch(e){ rtSecret = ""; } }
   // Same host as the page; CloudFront routes /viewsock to the relay WS.
   function buildURL() {
-    return (location.protocol === "https:" ? "wss://" : "ws://")
+    var u = (location.protocol === "https:" ? "wss://" : "ws://")
       + location.host + "/viewsock?token=" + encodeURIComponent(rtKey)
       + "&room=" + encodeURIComponent(rtRoom);
+    if (rtSecret) u += "&rs=" + encodeURIComponent(rtSecret);
+    return u;
   }
   var interimNodes = {};   // (stream:seq) -> node, for in-place interim updates
   var ws, backoff = 500;

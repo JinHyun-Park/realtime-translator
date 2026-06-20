@@ -173,6 +173,13 @@ final class AppModel: ObservableObject {
             UserDefaults.standard.set(v.isEmpty ? "default" : v, forKey: "roomID")
         }
     }
+    // Optional per-room secret (opt-in privacy). Sent as ?rs=... on connect.
+    // Leave blank for an open room; set one and your room locks to it (the first
+    // connection with a secret claims the room — TOFU). Persisted. NOT the same
+    // as the relay access password (that's box entry; this is room entry).
+    @Published var roomSecret: String = UserDefaults.standard.string(forKey: "roomSecret") ?? "" {
+        didSet { UserDefaults.standard.set(roomSecret, forKey: "roomSecret") }
+    }
     @Published var connected = false
     @Published var running = false
     @Published var status = "Idle"
@@ -384,6 +391,7 @@ final class AppModel: ObservableObject {
                                  resolvingAgainstBaseURL: false)
         var q = [URLQueryItem(name: "room", value: effectiveRoom)]
         if !accessKey.isEmpty { q.append(URLQueryItem(name: "key", value: accessKey)) }
+        if !roomSecret.isEmpty { q.append(URLQueryItem(name: "rs", value: roomSecret)) }
         comp?.queryItems = q
         guard let url = comp?.url else { status = "뷰어 URL 생성 실패"; return }
         rtlog("openViewerPage \(url.absoluteString)")
@@ -631,6 +639,7 @@ final class AppModel: ObservableObject {
         var q = comp?.queryItems ?? []
         if !accessKey.isEmpty { q.append(URLQueryItem(name: "token", value: accessKey)) }
         q.append(URLQueryItem(name: "room", value: effectiveRoom))
+        if !roomSecret.isEmpty { q.append(URLQueryItem(name: "rs", value: roomSecret)) }
         comp?.queryItems = q
         guard let url = comp?.url else {
             status = "Bad server URL"; return
