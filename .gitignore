@@ -30,3 +30,10 @@ deploy/.wake-url
 
 # Personal handoff notes — contains the relay token; never publish
 HANDOFF.md
+
+# "shared" distribution material — bakes in MY relay URL + the access token.
+# Local-only; never publish. (The dmg is already covered by mac-app/*.dmg.)
+SHARED_*.md
+*SHARED*.md
+mac-app/SHARED_*
+deploy/.shared-recipient
