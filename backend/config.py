@@ -30,9 +30,17 @@ class Settings:
 
     # --- Access control (simple shared password/token) ---
     # If set, every connection (capture AND viewer) must present this token via
-    # ?token=... on the WS URL (or Authorization: Bearer). Empty = open (dev).
-    # Set RT_RELAY_TOKEN in the systemd unit to lock the relay down to you only.
+    # ?token=... on the WS URL (or Authorization: Bearer). Set RT_RELAY_TOKEN in
+    # the systemd unit to lock the relay down to you only.
+    #
+    # SECURITY (fail-closed): an EMPTY token is treated as "open" ONLY when the
+    # relay is bound to localhost (RT_HOST loopback) — i.e. local dev. If the
+    # relay is bound to a public interface (0.0.0.0, the cloud default) with no
+    # token, we REFUSE all connections instead of silently running wide-open.
+    # To intentionally run a public relay with no auth (don't), set
+    # RT_ALLOW_OPEN=1 to acknowledge the risk.
     RELAY_TOKEN = _s("RT_RELAY_TOKEN", "")
+    ALLOW_OPEN = _s("RT_ALLOW_OPEN", "0") == "1"
 
     # --- Audio (must match what the Mac app sends) ---
     SAMPLE_RATE = _i("RT_SAMPLE_RATE", 16000)   # Hz, mono PCM16 LE
@@ -168,6 +176,22 @@ class Settings:
     # final wrap sends more so nothing important is missed.
     INSIGHT_LIVE_TRANSCRIPT_LINES = _i("RT_INSIGHT_LIVE_LINES", 40)
     INSIGHT_FINAL_TRANSCRIPT_LINES = _i("RT_INSIGHT_FINAL_LINES", 400)
+
+    @property
+    def host_is_loopback(self) -> bool:
+        # True only if bound to localhost — used to decide whether an empty token
+        # is acceptable (local dev) vs a public exposure that must stay closed.
+        return self.HOST in ("127.0.0.1", "localhost", "::1")
+
+    @property
+    def auth_open(self) -> bool:
+        # Auth is "open" (no token required) ONLY when there's no token AND it's
+        # safe: either bound to loopback, or the operator explicitly opted in via
+        # RT_ALLOW_OPEN=1. A tokenless relay on a public interface is NOT open —
+        # it refuses everything (fail-closed) so a forgotten token can't expose it.
+        if self.RELAY_TOKEN:
+            return False
+        return self.host_is_loopback or self.ALLOW_OPEN
 
     @property
     def frame_bytes(self) -> int:

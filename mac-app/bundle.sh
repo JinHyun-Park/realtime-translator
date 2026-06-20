@@ -9,6 +9,36 @@ CONFIG="${1:-release}"
 APP="RealtimeTranslator.app"
 BUNDLE_ID="dev.hjeongho.realtimetranslator"
 ENTITLEMENTS="RealtimeTranslator.entitlements"
+CONFIG_SWIFT="Sources/RealtimeTranslator/AppModel.swift"
+
+# Optionally bake a default relay URL into this build (the marker line in
+# AppModel.swift). Used for a build shared with one trusted person who should
+# use an existing box. NEVER bakes the token. Empty (default) => no URL baked
+# in, which is correct for a public distributable. We restore the file after.
+RESTORE_CONFIG=""
+cleanup() { [ -n "$RESTORE_CONFIG" ] && mv "$RESTORE_CONFIG" "$CONFIG_SWIFT" || true; }
+trap cleanup EXIT
+if [ -n "${RT_DEFAULT_SERVER_URL:-}" ]; then
+  echo "==> baking RT_DEFAULT_SERVER_URL=$RT_DEFAULT_SERVER_URL into the build"
+  RESTORE_CONFIG="$(mktemp)"
+  cp "$CONFIG_SWIFT" "$RESTORE_CONFIG"
+  # Replace ONLY the marked line; the trailing "// RT_DEFAULT_SERVER_URL" tag
+  # makes it unambiguous and idempotent.
+  python3 - "$CONFIG_SWIFT" "$RT_DEFAULT_SERVER_URL" <<'PY'
+import sys
+path, url = sys.argv[1], sys.argv[2]
+src = open(path).read().splitlines(keepends=True)
+out = []
+for line in src:
+    if line.rstrip().endswith("// RT_DEFAULT_SERVER_URL"):
+        indent = line[:len(line) - len(line.lstrip())]
+        esc = url.replace("\\", "\\\\").replace('"', '\\"')
+        out.append(f'{indent}static let defaultServerURL = "{esc}"  // RT_DEFAULT_SERVER_URL\n')
+    else:
+        out.append(line)
+open(path, "w").write("".join(out))
+PY
+fi
 
 echo "==> swift build -c $CONFIG"
 swift build -c "$CONFIG"
@@ -48,8 +78,16 @@ PLIST
 # Prefer a real signing identity (Apple Development cert, or one named via
 # RT_SIGN_IDENTITY). Fall back to ad-hoc only if none exists (which reintroduces
 # the per-build permission reset — avoid for Screen Recording).
+#
+# RT_ADHOC=1 FORCES ad-hoc signing even when a cert exists — used for a PUBLIC
+# distributable .dmg so the author's Apple ID / TeamID isn't embedded in a build
+# that strangers download. (Recipients get the same Gatekeeper prompt either
+# way, since the author's cert isn't trusted on their Macs anyway.)
 SIGN_ID="${RT_SIGN_IDENTITY:-}"
-if [ -z "$SIGN_ID" ]; then
+if [ "${RT_ADHOC:-0}" = "1" ]; then
+  SIGN_ID=""
+  echo "==> RT_ADHOC=1 — forcing ad-hoc signature (no personal identity embedded)"
+elif [ -z "$SIGN_ID" ]; then
   SIGN_ID=$(security find-identity -v -p codesigning 2>/dev/null \
     | grep -oE '"Apple Development: [^"]+"' | head -1 | tr -d '"')
 fi

@@ -141,11 +141,15 @@ def _is_viewer(ws) -> bool:
 
 
 def _authorized(ws) -> bool:
-    # Simple shared-token gate. Open if RELAY_TOKEN unset (dev). Token may come
-    # as ?token=... on the WS URL (browsers can't set WS headers) or as
-    # Authorization: Bearer <token> (native app).
+    # Shared-token gate. Token may come as ?token=... on the WS URL (browsers
+    # can't set WS headers) or as Authorization: Bearer <token> (native app).
+    #
+    # Fail-closed: with NO token set, we allow connections only when it's safe to
+    # be open (loopback bind, or explicit RT_ALLOW_OPEN=1). A tokenless relay
+    # bound to a public interface refuses everything — a forgotten token must not
+    # silently expose a cloud box. (See settings.auth_open.)
     if not settings.RELAY_TOKEN:
-        return True
+        return settings.auth_open
     import secrets as _secrets
     from urllib.parse import urlparse, parse_qs
     # 1) query param
@@ -368,10 +372,11 @@ async def _serve_http(port: int = 9000):
 
     def _http_token_ok(qs: dict, headers: bytes) -> bool:
         # Shared-token gate for control endpoints, mirroring _authorized() for WS.
-        # Open if RELAY_TOKEN unset (dev). Token via ?token= or X-Wake-Token header
-        # (the app already sends X-Wake-Token on /wake, so we accept the same one).
+        # Fail-closed when tokenless on a public bind (see settings.auth_open).
+        # Token via ?token= or X-Wake-Token header (the app already sends
+        # X-Wake-Token on /wake, so we accept the same one).
         if not settings.RELAY_TOKEN:
-            return True
+            return settings.auth_open
         import secrets as _secrets
         tok = (qs.get("token") or [""])[0]
         if tok and _secrets.compare_digest(tok, settings.RELAY_TOKEN):

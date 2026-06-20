@@ -1,7 +1,9 @@
 # Swift / SwiftPM
 mac-app/.build/
 mac-app/RealtimeTranslator.app/
-mac-app/RealtimeTranslator.dmg
+# All built .dmg files — build artifacts; the "shared" flavor also bakes in a
+# relay URL, so none of them belong in git.
+mac-app/*.dmg
 *.xcodeproj
 .swiftpm/
 

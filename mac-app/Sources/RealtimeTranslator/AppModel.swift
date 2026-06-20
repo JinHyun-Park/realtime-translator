@@ -5,6 +5,20 @@ import CoreGraphics
 import SwiftUI
 import UniformTypeIdentifiers
 
+/// App configuration. `defaultServerURL` is the relay URL shown on first run,
+/// before the user enters their own (which is then persisted). It is EMPTY by
+/// default: a PUBLIC distributable .dmg must NOT ship someone else's box URL
+/// baked in, or every recipient would point at the author's server.
+///
+/// A build CAN bake one in (e.g. a .dmg shared with one trusted person who
+/// should use the author's existing box) by setting RT_DEFAULT_SERVER_URL when
+/// building — bundle.sh rewrites the marker line below. The token is NEVER baked
+/// in either way; the user always enters the password themselves.
+enum AppConfig {
+    // BUILD-INJECTED: bundle.sh replaces the value below when RT_DEFAULT_SERVER_URL is set.
+    static let defaultServerURL = ""  // RT_DEFAULT_SERVER_URL
+}
+
 /// Diagnostic logger. Writes to BOTH stdout (for direct runs) and a fixed file
 /// (so runs launched via `open`/Finder — which have no visible stdout — are
 /// still observable). Append mode; flushed each line.
@@ -130,11 +144,13 @@ struct Line: Identifiable {
 final class AppModel: ObservableObject {
     // Connection
     // The relay URL. Persisted so each user types their own CloudFront/host once
-    // and it sticks across launches (others deploying their own box just set it
-    // once). Falls back to a sensible default only on first run.
-    // For local dev via SSM tunnel use ws://localhost:18765.
+    // and it sticks across launches. The first-run default is EMPTY for the
+    // distributable build — a shared .dmg must NOT ship someone else's box URL
+    // baked in (that would point every recipient at the author's server). A
+    // private build can bake one in via the RT_DEFAULT_SERVER_URL build setting
+    // (see AppConfig.defaultServerURL). For local dev use ws://localhost:18765.
     @Published var serverURL: String = UserDefaults.standard.string(forKey: "serverURL")
-        ?? "wss://dv7fu8km0bcfp.cloudfront.net" {
+        ?? AppConfig.defaultServerURL {
         didSet { UserDefaults.standard.set(serverURL, forKey: "serverURL") }
     }
     // Access password (shared token). Appended as ?token=... on connect.
