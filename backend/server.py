@@ -121,10 +121,37 @@ async def run_asr(pcm: bytes, interim: bool):
 DEFAULT_ROOM = "default"
 VIEWERS_BY_ROOM: dict[str, set] = {}
 
+# Per-room CAPTURE session registry, for the admin dashboard. Keyed by room ->
+# {capture sessions}. Each capture session is a dict the handler updates live
+# (stream side me/them, language pair, counts, last-activity timestamp). This is
+# metadata only — no transcript content is kept here. Used by /admin.
+CAPTURES_BY_ROOM: dict[str, list] = {}
+
 
 def _total_viewers() -> int:
     # Viewers across ALL rooms (for metrics + the idle-stop capture math).
     return sum(len(s) for s in VIEWERS_BY_ROOM.values())
+
+
+def _rooms_snapshot() -> list:
+    # Admin view: one entry per active room with capture + viewer metadata.
+    # Sorted by most-recently-active first. No transcript text — privacy by design.
+    rooms = set(VIEWERS_BY_ROOM) | set(CAPTURES_BY_ROOM)
+    out = []
+    for room in rooms:
+        caps = CAPTURES_BY_ROOM.get(room, [])
+        last = max((c.get("last_ts", 0) for c in caps), default=0)
+        out.append({
+            "room": room,
+            "captures": len(caps),
+            "streams": sorted({c.get("stream") for c in caps if c.get("stream")}),
+            "pairs": sorted({"-".join(c["pair"]) for c in caps if c.get("pair")}),
+            "finals": sum(c.get("finals", 0) for c in caps),
+            "viewers": len(VIEWERS_BY_ROOM.get(room, ())),
+            "idle_s": (int(_time.time() - last) if last else None),
+        })
+    out.sort(key=lambda r: (r["idle_s"] is None, r["idle_s"] or 0))
+    return out
 
 
 async def broadcast(payload: dict, room: str):
@@ -242,6 +269,10 @@ async def _handle(ws):
     tr = Translator()
     pair: tuple[str, str] = ("ko", "ja")
     stream: str | None = None     # "me" | "them" — set via config, tags broadcasts
+    # Register this capture session for the admin dashboard (metadata only).
+    cap_info = {"stream": None, "pair": list(pair), "finals": 0,
+                "last_ts": _time.time()}
+    CAPTURES_BY_ROOM.setdefault(room, []).append(cap_info)
     # Drop stale interim work if a newer one for the same seq arrives.
     interim_tasks: dict[int, asyncio.Task] = {}
 
@@ -270,6 +301,8 @@ async def _handle(ws):
             if is_final:
                 if translation.strip():
                     METRICS["finals_total"] += 1
+                    cap_info["finals"] += 1            # admin dashboard counter
+                    cap_info["last_ts"] = _time.time()  # room activity timestamp
                     # end-to-end latency: process start -> ready to send
                     dt = (_time.time() - t0) * 1000.0
                     _e2e_samples.append(dt)
@@ -329,6 +362,7 @@ async def _handle(ws):
                         p = msg.get("pair")
                         if isinstance(p, list) and len(p) == 2:
                             pair = (p[0], p[1])
+                            cap_info["pair"] = list(pair)   # admin dashboard
                             # English (SVO) needs whole clauses, so activate the
                             # sentence-gate when either side of the pair is EN.
                             # KO<->JA pairs leave it off (snappy pause-based).
@@ -338,6 +372,7 @@ async def _handle(ws):
                         s = msg.get("stream")
                         if s in ("me", "them"):
                             stream = s
+                            cap_info["stream"] = s          # admin dashboard
                     elif msg.get("type") == "end":
                         await dispatch(seg.flush())
             except websockets.ConnectionClosed:
@@ -353,7 +388,13 @@ async def _handle(ws):
             await dispatch(seg.flush())
         except Exception:
             pass
-        log.info("client disconnected: %s", peer)
+        # Deregister this capture from the admin registry; drop empty room lists.
+        caps = CAPTURES_BY_ROOM.get(room)
+        if caps and cap_info in caps:
+            caps.remove(cap_info)
+            if not caps:
+                CAPTURES_BY_ROOM.pop(room, None)
+        log.info("client disconnected: %s room=%s", peer, room)
 
 
 def _metrics_snapshot() -> dict:
@@ -390,6 +431,18 @@ def _load_viewer_html() -> bytes:
 _VIEWER_HTML = _load_viewer_html()
 
 
+def _load_admin_html() -> bytes:
+    import pathlib
+    p = pathlib.Path(__file__).parent / "admin.html"
+    try:
+        return p.read_bytes()
+    except Exception:
+        return b"<!doctype html><h1>admin.html missing</h1>"
+
+
+_ADMIN_HTML = _load_admin_html()
+
+
 async def _serve_http(port: int = 9000):
     # HTTP server: serves the viewer page (GET /view) AND metrics JSON (/metrics).
     # Bound to 0.0.0.0 so CloudFront can fetch the viewer page; lock :9000 to the
@@ -418,6 +471,15 @@ async def _serve_http(port: int = 9000):
                 if hv and _secrets.compare_digest(hv, settings.RELAY_TOKEN):
                     return True
         return False
+
+    def _admin_ok(qs: dict) -> bool:
+        # Admin dashboard gate — REQUIRES a separate ADMIN_TOKEN (never the shared
+        # relay token). If ADMIN_TOKEN is unset the dashboard is disabled.
+        if not settings.ADMIN_TOKEN:
+            return False
+        import secrets as _secrets
+        tok = (qs.get("token") or [""])[0]
+        return bool(tok and _secrets.compare_digest(tok, settings.ADMIN_TOKEN))
 
     async def _read_request(reader):
         # Read headers, then (for POST /insight) the body per Content-Length.
@@ -458,6 +520,26 @@ async def _serve_http(port: int = 9000):
             qs = parse_qs(parsed.query)
             if path in (b"/view", b"/view/", b"/viewer.html", b"/"):
                 body, ctype = _VIEWER_HTML, b"text/html; charset=utf-8"
+            elif path in (b"/admin", b"/admin/", b"/admin/rooms"):
+                # Operator-only room overview. Gated by a SEPARATE admin token.
+                # /admin -> HTML page (loads even without token; it then prompts
+                # and fetches /admin/rooms with the token). /admin/rooms -> JSON,
+                # which is the actual gated data.
+                if path == b"/admin/rooms":
+                    if not _admin_ok(qs):
+                        _reply(writer, b'{"error":"unauthorized"}',
+                               b"application/json", b"401 Unauthorized")
+                        await writer.drain(); return
+                    body = json.dumps({
+                        "rooms": _rooms_snapshot(),
+                        "totals": {"rooms": len(set(VIEWERS_BY_ROOM) | set(CAPTURES_BY_ROOM)),
+                                   "captures": sum(len(c) for c in CAPTURES_BY_ROOM.values()),
+                                   "viewers": _total_viewers()},
+                        "uptime_s": int(_time.time() - _START_TS),
+                    }).encode()
+                    ctype = b"application/json"
+                else:
+                    body, ctype = _ADMIN_HTML, b"text/html; charset=utf-8"
             elif path == b"/healthz":
                 # Tiny readiness probe for the app's wake flow. Deliberately
                 # leaks ONLY booleans (NOT full metrics): box stopped => the app

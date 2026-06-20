@@ -23,6 +23,7 @@ deploy/.cloudfront-id
 # OS
 .DS_Store
 deploy/.relay-token
+deploy/.admin-token
 deploy/.instance-id.big
 deploy/.golden-ami
 deploy/.eip-alloc

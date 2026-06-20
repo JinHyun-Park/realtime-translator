@@ -41,6 +41,11 @@ class Settings:
     # RT_ALLOW_OPEN=1 to acknowledge the risk.
     RELAY_TOKEN = _s("RT_RELAY_TOKEN", "")
     ALLOW_OPEN = _s("RT_ALLOW_OPEN", "0") == "1"
+    # Admin dashboard token — SEPARATE from RELAY_TOKEN so only the operator (not
+    # everyone who knows the shared connect password) can see the room overview
+    # at /admin. If unset, the admin dashboard is DISABLED entirely (404) rather
+    # than falling back to the shared token. Set RT_ADMIN_TOKEN in the unit.
+    ADMIN_TOKEN = _s("RT_ADMIN_TOKEN", "")
 
     # --- Audio (must match what the Mac app sends) ---
     SAMPLE_RATE = _i("RT_SAMPLE_RATE", 16000)   # Hz, mono PCM16 LE
