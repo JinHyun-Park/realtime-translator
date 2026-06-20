@@ -75,17 +75,46 @@ class Settings:
     # --- Endpointing / anti-cut knobs (THE important ones) ---
     # How long a pause must last before we LOCK a sentence. Bigger = waits more,
     # far fewer mid-sentence cuts, slightly more latency. This is the main dial.
-    MIN_SILENCE_MS = _i("RT_MIN_SILENCE_MS", 900)
+    # 650ms (from 900) makes finals land sooner; the punctuation-aware path below
+    # handles long no-pause monologues. Tunable live from the app.
+    MIN_SILENCE_MS = _i("RT_MIN_SILENCE_MS", 650)
     # Ignore blips: an utterance must contain at least this much real speech.
     MIN_SPEECH_MS = _i("RT_MIN_SPEECH_MS", 300)
-    # Hard ceiling so a non-stop speaker still gets periodic finals.
-    MAX_SEGMENT_MS = _i("RT_MAX_SEGMENT_MS", 12000)
+    # Hard ceiling so a non-stop speaker still gets periodic finals. Lowered to
+    # 8s (from 12s) so a long monologue gets finalized more often even when no
+    # sentence-end is detected. Tunable live from the app.
+    MAX_SEGMENT_MS = _i("RT_MAX_SEGMENT_MS", 8000)
+    # --- sentence-end early finalize (punctuation-aware endpointing) ----------
+    # Whisper already punctuates its transcription (。 . ? !) when it judges a
+    # sentence complete. When ON, an in-progress utterance whose latest interim
+    # ends in sentence punctuation AND has paused PUNCT_SILENCE_MS is finalized
+    # immediately — so someone who talks 1-2 min without a real break still gets
+    # crisp per-sentence subtitles instead of waiting out MIN_SILENCE/MAX_SEGMENT.
+    # We require BOTH punctuation and a tiny pause so a stray mid-speech period
+    # (whisper misfire) doesn't chop a sentence in half.
+    PUNCT_ENDPOINT_ENABLED = _s("RT_PUNCT_ENDPOINT", "1") == "1"
+    PUNCT_SILENCE_MS = _i("RT_PUNCT_SILENCE_MS", 300)
+    # --- English-target sentence gate -----------------------------------------
+    # KO and JA are SOV: chopping a sentence at a mid-utterance breath and
+    # translating the halves still reads fine (word order is preserved). English
+    # is SVO with reordering that CANNOT cross a wrong cut — so a half-sentence
+    # becomes a dangling noun phrase ("departments that seem like a good fit")
+    # plus a disconnected clause. When ON and the session's language pair
+    # involves English, we IGNORE the bare silence pause as a finalize trigger
+    # and only finalize on a grammatically-complete sentence (punctuation or a
+    # KO/JA sentence-final ending + a tiny pause) or the max-segment safety net.
+    # This keeps a clause whole so the English comes out as one well-ordered
+    # sentence. KO<->JA sessions are unaffected (still snappy pause-based).
+    EN_SENTENCE_GATE = _s("RT_EN_SENTENCE_GATE", "1") == "1"
     # Keep this much audio BEFORE speech starts so we never clip the first syllable.
     PREROLL_MS = _i("RT_PREROLL_MS", 300)
     # webrtcvad aggressiveness 0..3 (3 = most aggressive at calling things silence).
     VAD_AGGRESSIVENESS = _i("RT_VAD_AGGRESSIVENESS", 2)
     # How often to re-transcribe the in-progress utterance and emit an interim.
-    INTERIM_INTERVAL_MS = _i("RT_INTERIM_INTERVAL_MS", 700)
+    # 1000ms (up from 700) keeps interim translation calls ~1/s so a Bedrock
+    # round-trip can be absorbed without the preview lagging, and roughly halves
+    # interim LLM call volume (matters when interim also goes to a paid API).
+    INTERIM_INTERVAL_MS = _i("RT_INTERIM_INTERVAL_MS", 1000)
     # Interim ASR only re-transcribes the most recent N ms of the utterance, so
     # cost stays flat as a sentence grows (instead of re-running the whole 12s
     # buffer every 0.5s). Finals always use the FULL utterance for accuracy.
@@ -102,6 +131,22 @@ class Settings:
     LLM_TIMEOUT = _f("RT_LLM_TIMEOUT", 20.0)
     # How many previous final sentences to feed as context for coherence.
     CONTEXT_WINDOW = _i("RT_CONTEXT_WINDOW", 3)
+
+    # --- Translation provider switch: "vllm" (local Qwen) | "bedrock" (Claude) ---
+    # The app flips this live via /control/llm. "bedrock" routes translation to
+    # Claude Sonnet 4.6 on Amazon Bedrock (higher accuracy); "vllm" uses the local
+    # Qwen3-32B (free, fast, offline). On a Bedrock throttle/error we fall back to
+    # Qwen for THAT call so subtitles never go blank mid-meeting.
+    LLM_PROVIDER = _s("RT_LLM_PROVIDER", "vllm")        # default: local Qwen
+    # Bedrock cross-region inference profile. Sonnet 4.6 has NO apac. profile, so
+    # in Tokyo use "global." (no premium) — NOT "apac.". "jp." is also valid (10%
+    # premium, data stays in Japan).
+    BEDROCK_MODEL = _s("RT_BEDROCK_MODEL", "global.anthropic.claude-sonnet-4-6")
+    # Region the bedrock-runtime endpoint is hit in. The box is in Tokyo.
+    BEDROCK_REGION = _s("RT_BEDROCK_REGION", "ap-northeast-1")
+    # Cap output so a runaway translation can't blow latency/cost. Subtitles are
+    # short — a couple hundred tokens is plenty.
+    BEDROCK_MAX_TOKENS = _i("RT_BEDROCK_MAX_TOKENS", 512)
 
     @property
     def frame_bytes(self) -> int:

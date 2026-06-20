@@ -153,6 +153,49 @@ final class AppModel: ObservableObject {
     private var wakeStartedAt: Date?
     private var wakeTask: Task<Void, Never>?
 
+    // --- Auto-stop (GPU cost guard) controls, mirrored to the server ---
+    // The box self-stops after idleStopMinutes of zero capture UNLESS
+    // autoStopEnabled is off. Persisted so the choice survives app restarts,
+    // and re-pushed to the box on every wake (a stop/start resets the server to
+    // its env defaults). autoStopApplied tracks whether the live box has our
+    // current setting yet (for UI + to re-apply after wake).
+    @Published var autoStopEnabled: Bool = (UserDefaults.standard.object(forKey: "autoStopEnabled") as? Bool ?? true) {
+        didSet { UserDefaults.standard.set(autoStopEnabled, forKey: "autoStopEnabled") }
+    }
+    @Published var idleStopMinutes: Int = (UserDefaults.standard.object(forKey: "idleStopMinutes") as? Int ?? 15) {
+        didSet { UserDefaults.standard.set(idleStopMinutes, forKey: "idleStopMinutes") }
+    }
+    // Transient UI feedback for the control buttons (e.g. "자동끔 OFF 적용됨").
+    @Published var idleControlStatus = ""
+
+    // --- Translation model: local Qwen vs Claude Sonnet 4.6 (Bedrock) ---
+    // useClaude=true routes translation to Claude on Bedrock (higher accuracy,
+    // costs API $; on a throttle the server auto-falls-back to Qwen for that
+    // call). Persisted and re-applied on every wake (the server resets to its
+    // env default on stop/start). idleStatus-style transient feedback reused.
+    @Published var useClaude: Bool = (UserDefaults.standard.object(forKey: "useClaude") as? Bool ?? false) {
+        didSet { UserDefaults.standard.set(useClaude, forKey: "useClaude") }
+    }
+    @Published var llmControlStatus = ""
+
+    // --- Sentence endpointing (when to break a sentence and translate it) ---
+    // The relay finalizes a sentence on a long pause, a max-length flush, OR —
+    // when punctEnabled — as soon as Whisper punctuates the interim AND there's a
+    // tiny breath (punctSilenceMs). Lowering minSilenceMs makes finals land
+    // sooner (snappier, but risks chopping a slow speaker). Persisted and
+    // re-applied on every wake (server resets to env defaults on stop/start).
+    // Defaults mirror backend/config.py so the UI shows the box's real state.
+    @Published var minSilenceMs: Int = (UserDefaults.standard.object(forKey: "minSilenceMs") as? Int ?? 650) {
+        didSet { UserDefaults.standard.set(minSilenceMs, forKey: "minSilenceMs") }
+    }
+    @Published var punctEnabled: Bool = (UserDefaults.standard.object(forKey: "punctEnabled") as? Bool ?? true) {
+        didSet { UserDefaults.standard.set(punctEnabled, forKey: "punctEnabled") }
+    }
+    @Published var punctSilenceMs: Int = (UserDefaults.standard.object(forKey: "punctSilenceMs") as? Int ?? 300) {
+        didSet { UserDefaults.standard.set(punctSilenceMs, forKey: "punctSilenceMs") }
+    }
+    @Published var endpointControlStatus = ""
+
     // Language pair (KO<->JA default). The relay auto-detects which side spoke.
     @Published var langA = "ko"
     @Published var langB = "ja"
@@ -236,6 +279,177 @@ final class AppModel: ObservableObject {
         comp.scheme = (comp.scheme == "ws") ? "http" : "https"   // wss -> https
         comp.path = ""; comp.query = nil; comp.fragment = nil
         return comp.url
+    }
+
+    /// Open the broadcast viewer page (`/view`) in the default browser — the same
+    /// live-subtitle page teammates use. The password rides as `?key=...` so it
+    /// connects without prompting (viewer.html reads `key`, saves to localStorage).
+    /// This opens on YOUR machine, so embedding the token is fine; to hand the URL
+    /// to others, share the bare `/view` link and let them type the password.
+    func openViewerPage() {
+        guard let base = httpBase() else { status = "서버 주소 오류"; return }
+        var comp = URLComponents(url: base.appendingPathComponent("view"),
+                                 resolvingAgainstBaseURL: false)
+        if !accessKey.isEmpty {
+            comp?.queryItems = [URLQueryItem(name: "key", value: accessKey)]
+        }
+        guard let url = comp?.url else { status = "뷰어 URL 생성 실패"; return }
+        rtlog("openViewerPage \(url.absoluteString)")
+        NSWorkspace.shared.open(url)
+    }
+
+    // MARK: - Auto-stop control (cost guard)
+
+    /// Build a /control/<action> URL with the token + query params. Token rides
+    /// as ?token= AND we also send X-Wake-Token (server accepts either).
+    private func controlURL(_ action: String, _ items: [URLQueryItem]) -> URL? {
+        guard let base = httpBase() else { return nil }
+        var comp = URLComponents(url: base.appendingPathComponent(action),
+                                 resolvingAgainstBaseURL: false)
+        var q = items
+        if !accessKey.isEmpty { q.append(URLQueryItem(name: "token", value: accessKey)) }
+        comp?.queryItems = q
+        return comp?.url
+    }
+
+    /// Push the current auto-stop preference (enabled + minutes) to the live box.
+    /// Called from the toggle/buttons and automatically right after a wake (the
+    /// server resets to env defaults on every stop/start, so we re-assert).
+    func applyIdleSetting() {
+        let enabled = autoStopEnabled
+        let seconds = max(1, idleStopMinutes) * 60
+        guard let url = controlURL("control/idle", [
+            URLQueryItem(name: "enabled", value: enabled ? "1" : "0"),
+            URLQueryItem(name: "seconds", value: String(seconds)),
+        ]) else { idleControlStatus = "서버 주소 오류"; return }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        if !accessKey.isEmpty { req.setValue(accessKey, forHTTPHeaderField: "X-Wake-Token") }
+        rtlog("applyIdleSetting enabled=\(enabled) seconds=\(seconds)")
+        Task { [weak self] in
+            do {
+                let (_, resp) = try await URLSession.shared.data(for: req)
+                let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+                await MainActor.run {
+                    if code == 401 || code == 403 {
+                        self?.idleControlStatus = "비밀번호 오류 — 설정 미적용"
+                    } else if code == 200 {
+                        self?.idleControlStatus = enabled
+                            ? "자동끔 ON (\(self?.idleStopMinutes ?? 0)분)"
+                            : "자동끔 OFF — 수동으로 끌 때까지 안 꺼짐"
+                    } else if code == 502 || code == 504 {
+                        self?.idleControlStatus = "서버 꺼져 있음 — 깨운 뒤 자동 적용"
+                    } else {
+                        self?.idleControlStatus = "적용 실패 (\(code))"
+                    }
+                }
+            } catch {
+                await MainActor.run { self?.idleControlStatus = "서버 응답 없음 (꺼져 있을 수 있음)" }
+            }
+        }
+    }
+
+    /// Push the translation-model choice (Qwen vs Claude) to the live box.
+    /// Called from the toggle and re-applied after every wake (server resets to
+    /// its env default on stop/start).
+    func applyLLMSetting() {
+        let provider = useClaude ? "bedrock" : "vllm"
+        guard let url = controlURL("control/llm", [
+            URLQueryItem(name: "provider", value: provider),
+        ]) else { llmControlStatus = "서버 주소 오류"; return }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        if !accessKey.isEmpty { req.setValue(accessKey, forHTTPHeaderField: "X-Wake-Token") }
+        rtlog("applyLLMSetting provider=\(provider)")
+        Task { [weak self] in
+            do {
+                let (_, resp) = try await URLSession.shared.data(for: req)
+                let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+                await MainActor.run {
+                    if code == 401 || code == 403 {
+                        self?.llmControlStatus = "비밀번호 오류 — 설정 미적용"
+                    } else if code == 200 {
+                        self?.llmControlStatus = (self?.useClaude ?? false)
+                            ? "번역: Claude Sonnet 4.6 (정확도↑)"
+                            : "번역: Qwen 3-32B (로컬·무료)"
+                    } else if code == 502 || code == 504 {
+                        self?.llmControlStatus = "서버 꺼져 있음 — 깨운 뒤 자동 적용"
+                    } else {
+                        self?.llmControlStatus = "적용 실패 (\(code))"
+                    }
+                }
+            } catch {
+                await MainActor.run { self?.llmControlStatus = "서버 응답 없음 (꺼져 있을 수 있음)" }
+            }
+        }
+    }
+
+    /// Push the sentence-endpointing knobs (silence threshold + punctuation
+    /// early-finalize) to the live box. Called from the slider/toggle and
+    /// re-applied after every wake (the server resets to env defaults on
+    /// stop/start). The server clamps each value, so out-of-range is harmless.
+    func applyEndpointSetting() {
+        let silence = max(300, min(3000, minSilenceMs))
+        let punctMs = max(0, min(1500, punctSilenceMs))
+        guard let url = controlURL("control/endpoint", [
+            URLQueryItem(name: "silence_ms", value: String(silence)),
+            URLQueryItem(name: "punct", value: punctEnabled ? "1" : "0"),
+            URLQueryItem(name: "punct_ms", value: String(punctMs)),
+        ]) else { endpointControlStatus = "서버 주소 오류"; return }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        if !accessKey.isEmpty { req.setValue(accessKey, forHTTPHeaderField: "X-Wake-Token") }
+        rtlog("applyEndpointSetting silence=\(silence) punct=\(punctEnabled) punctMs=\(punctMs)")
+        Task { [weak self] in
+            do {
+                let (_, resp) = try await URLSession.shared.data(for: req)
+                let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+                await MainActor.run {
+                    if code == 401 || code == 403 {
+                        self?.endpointControlStatus = "비밀번호 오류 — 설정 미적용"
+                    } else if code == 200 {
+                        let s = self?.minSilenceMs ?? 0
+                        self?.endpointControlStatus = (self?.punctEnabled ?? false)
+                            ? "문장 끊기: 침묵 \(s)ms + 구두점 조기확정 ON"
+                            : "문장 끊기: 침묵 \(s)ms (구두점 조기확정 OFF)"
+                    } else if code == 502 || code == 504 {
+                        self?.endpointControlStatus = "서버 꺼져 있음 — 깨운 뒤 자동 적용"
+                    } else {
+                        self?.endpointControlStatus = "적용 실패 (\(code))"
+                    }
+                }
+            } catch {
+                await MainActor.run { self?.endpointControlStatus = "서버 응답 없음 (꺼져 있을 수 있음)" }
+            }
+        }
+    }
+
+    /// Manual kill switch: stop the GPU box right now, regardless of auto-stop.
+    /// Use after a meeting to stop paying immediately instead of waiting out the
+    /// idle timer. If capture is running we stop it first (clean shutdown).
+    func stopServerNow() {
+        if running { stop() }
+        guard let url = controlURL("control/stop", []) else {
+            idleControlStatus = "서버 주소 오류"; return
+        }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        if !accessKey.isEmpty { req.setValue(accessKey, forHTTPHeaderField: "X-Wake-Token") }
+        rtlog("stopServerNow")
+        idleControlStatus = "서버 끄는 중…"
+        Task { [weak self] in
+            do {
+                let (_, resp) = try await URLSession.shared.data(for: req)
+                let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+                await MainActor.run {
+                    switch code {
+                    case 200:        self?.idleControlStatus = "서버 끄는 중 — 과금 곧 멈춤"
+                    case 401, 403:   self?.idleControlStatus = "비밀번호 오류 — 못 껐어요"
+                    case 502, 504:   self?.idleControlStatus = "이미 꺼져 있어요"
+                    default:         self?.idleControlStatus = "끄기 실패 (\(code))"
+                    }
+                    self?.serverPhase = .idle
+                }
+            } catch {
+                await MainActor.run { self?.idleControlStatus = "이미 꺼져 있거나 응답 없음" }
+            }
+        }
     }
 
     /// One-tap: wake the box (if asleep), wait until /healthz says ready, then
@@ -347,6 +561,12 @@ final class AppModel: ObservableObject {
         wakeDetail = "준비 완료 — 시작합니다"
         wakeTask = nil
         notifyReady()
+        // The box just (re)booted, so its auto-stop, translation-model choice AND
+        // sentence-endpointing knobs are back at the env defaults. Re-assert all
+        // saved preferences now.
+        applyIdleSetting()
+        applyLLMSetting()
+        applyEndpointSetting()
         // Auto-press Start so one tap = end-to-end. If the user already pressed
         // Stop in the meantime we respect that (running guard inside start()).
         if !running { start() }

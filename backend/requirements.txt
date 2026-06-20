@@ -4,3 +4,4 @@ faster-whisper>=1.1.0
 ctranslate2>=4.0.0      # multi-GPU device_index "invalid argument" fixed >=3.16.1
 openai>=1.40.0
 boto3>=1.34.0           # self-stop on idle (ec2:StopInstances via instance role)
+anthropic[bedrock]>=0.40.0  # optional Claude/Bedrock translation provider (RT_LLM_PROVIDER=bedrock)

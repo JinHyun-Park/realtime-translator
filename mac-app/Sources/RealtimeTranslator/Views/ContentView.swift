@@ -45,6 +45,122 @@ struct ControlPanel: View {
                                 .font(.caption2).monospaced()
                                 .foregroundStyle(.secondary)
                         }
+                        Divider()
+                        // Open the broadcast viewer page in the browser — the live
+                        // subtitle page teammates watch. Opens with the password
+                        // pre-filled so it connects without prompting.
+                        Button {
+                            model.openViewerPage()
+                        } label: {
+                            Label("브라우저로 자막 보기 (/view)", systemImage: "safari")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .controlSize(.regular)
+                        Text("팀원과 함께 볼 땐 이 페이지 주소를 공유하세요 (비번 입력하면 시청).")
+                            .font(.caption2).foregroundStyle(.secondary)
+                    }.padding(6)
+                }
+
+                // Auto-stop (GPU cost guard) — turn it off so the box stays up,
+                // change the timeout, or stop the box right now.
+                GroupBox("자동 끄기 (비용 절감)") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Toggle("유휴 시 자동으로 끄기", isOn: $model.autoStopEnabled)
+                            .onChange(of: model.autoStopEnabled) { _ in
+                                model.applyIdleSetting()
+                            }
+                        HStack {
+                            Text("끄기까지").font(.caption)
+                            Picker("", selection: $model.idleStopMinutes) {
+                                Text("10분").tag(10)
+                                Text("15분").tag(15)
+                                Text("30분").tag(30)
+                                Text("60분").tag(60)
+                            }
+                            .labelsHidden()
+                            .frame(width: 90)
+                            .disabled(!model.autoStopEnabled)
+                            .onChange(of: model.idleStopMinutes) { _ in
+                                model.applyIdleSetting()
+                            }
+                            Spacer()
+                        }
+                        Text(model.autoStopEnabled
+                             ? "회의 중엔 안 꺼져요 (캡처 중엔 유휴 아님). 보기만 하는 뷰어는 카운트 안 함."
+                             : "⚠️ 자동으로 안 꺼집니다 — 다 쓰면 아래 '지금 끄기'로 직접 끄세요 (과금 계속됨).")
+                            .font(.caption2).foregroundStyle(.secondary)
+                        Divider()
+                        Button(role: .destructive) {
+                            model.stopServerNow()
+                        } label: {
+                            Label("지금 서버 끄기", systemImage: "stop.circle")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .controlSize(.regular)
+                        if !model.idleControlStatus.isEmpty {
+                            Text(model.idleControlStatus)
+                                .font(.caption2).foregroundStyle(.secondary)
+                        }
+                    }.padding(6)
+                }
+
+                // Translation model — local Qwen vs Claude Sonnet 4.6 (Bedrock).
+                GroupBox("번역 모델") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Toggle("Claude Sonnet 4.6 사용 (정확도 ↑)", isOn: $model.useClaude)
+                            .onChange(of: model.useClaude) { _ in
+                                model.applyLLMSetting()
+                            }
+                        Text(model.useClaude
+                             ? "클라우드 번역(Bedrock). 더 정확하지만 호출당 과금 + 인터넷 필요. 일시 폭주 시 자동으로 Qwen으로 폴백."
+                             : "로컬 Qwen 3-32B. 무료·오프라인, 정확도는 Claude보다 한 수 아래.")
+                            .font(.caption2).foregroundStyle(.secondary)
+                        if !model.llmControlStatus.isEmpty {
+                            Text(model.llmControlStatus)
+                                .font(.caption2).foregroundStyle(.secondary)
+                        }
+                    }.padding(6)
+                }
+
+                // Sentence endpointing — how aggressively to break + translate.
+                // Lower silence = snappier (translates sooner); punctuation
+                // early-finalize lets a long no-pause monologue break per sentence.
+                GroupBox("문장 끊기 (반응 속도)") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Text("침묵 민감도").font(.caption)
+                            Spacer()
+                            Text("\(model.minSilenceMs)ms")
+                                .font(.caption2).monospaced().foregroundStyle(.secondary)
+                        }
+                        Slider(value: Binding(
+                            get: { Double(model.minSilenceMs) },
+                            set: { model.minSilenceMs = Int(($0 / 50).rounded()) * 50 }
+                        ), in: 300...1500, step: 50) {
+                            Text("침묵 민감도")
+                        } minimumValueLabel: {
+                            Text("빠름").font(.caption2)
+                        } maximumValueLabel: {
+                            Text("신중").font(.caption2)
+                        }
+                        .onChange(of: model.minSilenceMs) { _ in
+                            model.applyEndpointSetting()
+                        }
+                        Text("작을수록 말 끝나자마자 번역(빠름), 클수록 더 기다림(느리지만 안 잘림).")
+                            .font(.caption2).foregroundStyle(.secondary)
+                        Divider()
+                        Toggle("구두점에서 문장 조기 확정", isOn: $model.punctEnabled)
+                            .onChange(of: model.punctEnabled) { _ in
+                                model.applyEndpointSetting()
+                            }
+                        Text(model.punctEnabled
+                             ? "안 쉬고 길게 말해도 한 문장 끝(. 。 ? !)이 보이면 바로 끊어 번역해요."
+                             : "구두점 무시 — 침묵이 생길 때까지만 기다립니다.")
+                            .font(.caption2).foregroundStyle(.secondary)
+                        if !model.endpointControlStatus.isEmpty {
+                            Text(model.endpointControlStatus)
+                                .font(.caption2).foregroundStyle(.secondary)
+                        }
                     }.padding(6)
                 }
 

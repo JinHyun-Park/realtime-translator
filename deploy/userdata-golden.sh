@@ -42,10 +42,67 @@ else
   echo "WARN: GPU still not visible after DKMS rebuild"
 fi
 
+# --- 0b. make the GPU fix SURVIVE stop/start (user-data only runs on 1st boot) -
+# The block above runs only on the FIRST boot of an instance. A stop/start does
+# NOT re-run user-data, so without this, a kernel that drifted while stopped
+# would leave the GPU invisible and rt-relay crash-looping. Two safeguards:
+#  (A) kill unattended-upgrades — the root cause of kernel/nvidia drift.
+#  (B) install a boot-time self-heal unit (rt-gpu-guard) that rebuilds the
+#      nvidia DKMS module BEFORE rt-relay starts, on EVERY boot.
+systemctl disable --now unattended-upgrades 2>/dev/null || true
+systemctl mask unattended-upgrades 2>/dev/null || true
+systemctl disable --now apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
+cat > /etc/apt/apt.conf.d/20auto-upgrades <<'CFG'
+APT::Periodic::Update-Package-Lists "0";
+APT::Periodic::Unattended-Upgrade "0";
+CFG
+
+cat > /usr/local/sbin/rt-gpu-guard.sh <<'GUARD'
+#!/bin/bash
+set -x
+KREL=$(uname -r)
+if nvidia-smi -L >/dev/null 2>&1; then echo "rt-gpu-guard: GPU OK ($KREL)"; exit 0; fi
+echo "rt-gpu-guard: GPU NOT visible on $KREL — rebuilding nvidia DKMS"
+apt-get install -y -q --allow-change-held-packages "linux-headers-$KREL" 2>&1 | tail -3 || true
+rmmod nvidia_uvm nvidia_drm nvidia_modeset nvidia 2>/dev/null || true
+dkms autoinstall -k "$KREL" 2>&1 | tail -6 || true
+modprobe nvidia 2>&1 || true
+nvidia-smi -L 2>&1 | head -2
+GUARD
+chmod +x /usr/local/sbin/rt-gpu-guard.sh
+
+cat > /etc/systemd/system/rt-gpu-guard.service <<'UNIT'
+[Unit]
+Description=RT GPU guard — ensure nvidia driver matches running kernel before relay
+After=network-online.target
+Wants=network-online.target
+Before=rt-relay.service
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/rt-gpu-guard.sh
+TimeoutStartSec=600
+[Install]
+WantedBy=multi-user.target
+UNIT
+mkdir -p /etc/systemd/system/rt-relay.service.d
+cat > /etc/systemd/system/rt-relay.service.d/10-gpu-guard.conf <<'DROPIN'
+[Unit]
+Wants=rt-gpu-guard.service
+After=rt-gpu-guard.service
+DROPIN
+systemctl enable rt-gpu-guard.service 2>/dev/null || true
+
 # --- 1. refresh backend code from S3 (the only thing newer than the image) ---
 aws s3 cp "s3://$BUCKET/rt-backend.tgz" /tmp/rt-backend.tgz --region "$REGION"
 tar xzf /tmp/rt-backend.tgz -C "$RT_DIR/backend"
 echo "CODE_REFRESHED" > $STATUS
+
+# anthropic[bedrock] is only needed for the optional Claude translation
+# provider; the golden image predates it, so ensure it's present (idempotent,
+# fast no-op once baked into a future image).
+python3 -c "import anthropic" 2>/dev/null || \
+  python3 -m pip install "anthropic[bedrock]>=0.40.0" || true
 
 # --- 2. GPU topology -> worker count + vLLM mem (matches full userdata) ------
 NGPU=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | wc -l | tr -d ' ')

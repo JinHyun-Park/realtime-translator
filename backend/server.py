@@ -28,7 +28,7 @@ import websockets
 
 from asr import Asr
 from config import settings
-from segmenter import Segmenter
+from segmenter import Segmenter, ENDPOINT, ends_sentence
 from translator import Translator
 
 logging.basicConfig(
@@ -65,6 +65,18 @@ _wait_samples: list[float] = []
 _e2e_samples: list[float] = []   # end-to-end latency (ms) of finals
 import time as _time
 _START_TS = _time.time()
+
+# Runtime-mutable idle-stop controls. Seeded from config (env vars set at boot)
+# but the app can flip these live via /control/idle WITHOUT a redeploy:
+#   - enabled=False  => the box NEVER auto-stops (stays up until manually stopped)
+#   - seconds        => how long with zero capture before self-stop
+# The idle loop re-reads this dict every cycle, so changes take effect within
+# one IDLE_CHECK_S tick. NOTE: a stop/start resets this to the env defaults, so
+# the app re-applies the user's preference on every wake.
+IDLE = {
+    "enabled": settings.IDLE_STOP_ENABLED,
+    "seconds": settings.IDLE_STOP_S,
+}
 
 
 async def run_asr(pcm: bytes, interim: bool):
@@ -212,6 +224,12 @@ async def _handle(ws):
                     log.warning("final dropped (no ASR text) seq=%s stream=%s",
                                 ev.seq, stream)
                 return
+            # Punctuation-aware endpointing: if this INTERIM transcription looks
+            # like a completed sentence, tell the segmenter so it finalizes early
+            # (after a tiny pause) instead of waiting out MIN_SILENCE/MAX_SEGMENT.
+            # Lets a long no-pause monologue break per-sentence.
+            if not is_final and ends_sentence(res.text):
+                seg.mark_sentence_complete(ev.seq)
             translation, tgt = await tr.translate(
                 res.text, res.language, pair, final=is_final
             )
@@ -277,7 +295,12 @@ async def _handle(ws):
                         p = msg.get("pair")
                         if isinstance(p, list) and len(p) == 2:
                             pair = (p[0], p[1])
-                            log.info("pair set to %s", pair)
+                            # English (SVO) needs whole clauses, so activate the
+                            # sentence-gate when either side of the pair is EN.
+                            # KO<->JA pairs leave it off (snappy pause-based).
+                            seg.set_english_target("en" in pair)
+                            log.info("pair set to %s (english_gate=%s)",
+                                     pair, "en" in pair)
                         s = msg.get("stream")
                         if s in ("me", "them"):
                             stream = s
@@ -306,11 +329,15 @@ def _metrics_snapshot() -> dict:
     finals = METRICS["finals_total"]
     dropped = METRICS["finals_dropped"]
     drop_rate = round(dropped / (finals + dropped), 4) if (finals + dropped) else 0.0
+    from translator import LLM
     return {**METRICS,
             "asr_wait_ms_p95": _p95(_wait_samples),
             "e2e_ms_p95": _p95(_e2e_samples),
             "finals_drop_rate": drop_rate,      # the headline reliability number
             "llm_errors": Translator.llm_errors,
+            "llm_provider": LLM["provider"],         # vllm | bedrock (live)
+            "bedrock_fallbacks": Translator.bedrock_fallbacks,
+            "endpoint": dict(ENDPOINT),              # live sentence-seg knobs
             "uptime_s": int(_time.time() - _START_TS),
             "asr_workers": settings.ASR_WORKERS,
             "viewers": len(VIEWERS)}
@@ -332,12 +359,38 @@ async def _serve_http(port: int = 9000):
     # HTTP server: serves the viewer page (GET /view) AND metrics JSON (/metrics).
     # Bound to 0.0.0.0 so CloudFront can fetch the viewer page; lock :9000 to the
     # CloudFront origin-facing prefix list at the SG layer (per no-public rule).
+    from urllib.parse import urlparse, parse_qs
+
+    def _reply(writer, body: bytes, ctype: bytes, status: bytes = b"200 OK"):
+        writer.write(b"HTTP/1.1 " + status + b"\r\nContent-Type: " + ctype +
+                     b"\r\nContent-Length: " + str(len(body)).encode() +
+                     b"\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n" + body)
+
+    def _http_token_ok(qs: dict, headers: bytes) -> bool:
+        # Shared-token gate for control endpoints, mirroring _authorized() for WS.
+        # Open if RELAY_TOKEN unset (dev). Token via ?token= or X-Wake-Token header
+        # (the app already sends X-Wake-Token on /wake, so we accept the same one).
+        if not settings.RELAY_TOKEN:
+            return True
+        import secrets as _secrets
+        tok = (qs.get("token") or [""])[0]
+        if tok and _secrets.compare_digest(tok, settings.RELAY_TOKEN):
+            return True
+        for line in headers.split(b"\r\n"):
+            if line.lower().startswith(b"x-wake-token:"):
+                hv = line.split(b":", 1)[1].strip().decode(errors="ignore")
+                if hv and _secrets.compare_digest(hv, settings.RELAY_TOKEN):
+                    return True
+        return False
+
     async def cb(reader, writer):
         try:
             req = await reader.read(2048)
             first = req.split(b"\r\n", 1)[0]
-            path = first.split(b" ")[1] if b" " in first else b"/"
-            path = path.split(b"?", 1)[0]
+            raw = first.split(b" ")[1] if b" " in first else b"/"
+            parsed = urlparse(raw.decode(errors="ignore"))
+            path = parsed.path.encode()
+            qs = parse_qs(parsed.query)
             if path in (b"/view", b"/view/", b"/viewer.html", b"/"):
                 body, ctype = _VIEWER_HTML, b"text/html; charset=utf-8"
             elif path == b"/healthz":
@@ -353,12 +406,74 @@ async def _serve_http(port: int = 9000):
                     "ready": bool(METRICS["vllm_up"] and ASR is not None),
                 }).encode()
                 ctype = b"application/json"
+            elif path in (b"/control/idle", b"/control/stop", b"/control/llm",
+                          b"/control/endpoint"):
+                # Token-gated controls the app drives. /control/idle flips
+                # auto-stop on/off and sets the timeout live; /control/stop stops
+                # the box right now; /control/llm switches the translation model
+                # (Qwen <-> Claude/Bedrock). All reflect the user's explicit
+                # intent, so the box obeys even mid-meeting.
+                if not _http_token_ok(qs, req):
+                    _reply(writer, b'{"ok":false,"error":"unauthorized"}',
+                           b"application/json", b"401 Unauthorized")
+                    await writer.drain()
+                    return
+                if path == b"/control/stop":
+                    log.warning("manual /control/stop — stopping box now")
+                    asyncio.create_task(_self_stop())
+                    body = json.dumps({"ok": True, "stopping": True}).encode()
+                elif path == b"/control/llm":
+                    # ?provider=bedrock | vllm  — live translation-model switch.
+                    from translator import LLM
+                    if "provider" in qs:
+                        p = qs["provider"][0]
+                        LLM["provider"] = "bedrock" if p == "bedrock" else "vllm"
+                    log.info("control/llm -> provider=%s", LLM["provider"])
+                    body = json.dumps({"ok": True, "provider": LLM["provider"]}).encode()
+                elif path == b"/control/endpoint":
+                    # Live sentence-segmentation tuning. Params (all optional):
+                    #   silence_ms   -> ENDPOINT.min_silence_ms  (300..3000)
+                    #   max_ms       -> ENDPOINT.max_segment_ms   (3000..30000)
+                    #   punct        -> ENDPOINT.punct_enabled    (0/1)
+                    #   punct_ms     -> ENDPOINT.punct_silence_ms (0..1500)
+                    #   en_gate      -> ENDPOINT.en_sentence_gate (0/1) — keep
+                    #                   English-target clauses whole (no bare-pause cut)
+                    def _clamp_int(key, lo, hi):
+                        if key in qs:
+                            try:
+                                return max(lo, min(hi, int(qs[key][0])))
+                            except ValueError:
+                                return None
+                        return None
+                    v = _clamp_int("silence_ms", 300, 3000)
+                    if v is not None: ENDPOINT["min_silence_ms"] = v
+                    v = _clamp_int("max_ms", 3000, 30000)
+                    if v is not None: ENDPOINT["max_segment_ms"] = v
+                    v = _clamp_int("punct_ms", 0, 1500)
+                    if v is not None: ENDPOINT["punct_silence_ms"] = v
+                    if "punct" in qs:
+                        ENDPOINT["punct_enabled"] = (qs["punct"][0] not in ("0", "false", "False"))
+                    if "en_gate" in qs:
+                        ENDPOINT["en_sentence_gate"] = (qs["en_gate"][0] not in ("0", "false", "False"))
+                    log.info("control/endpoint -> %s", ENDPOINT)
+                    body = json.dumps({"ok": True, **ENDPOINT}).encode()
+                else:  # /control/idle
+                    if "enabled" in qs:
+                        IDLE["enabled"] = (qs["enabled"][0] not in ("0", "false", "False"))
+                    if "seconds" in qs:
+                        try:
+                            IDLE["seconds"] = max(60, int(qs["seconds"][0]))
+                        except ValueError:
+                            pass
+                    log.info("control/idle -> enabled=%s seconds=%s",
+                             IDLE["enabled"], IDLE["seconds"])
+                    body = json.dumps({"ok": True, "enabled": IDLE["enabled"],
+                                       "seconds": IDLE["seconds"]}).encode()
+                ctype = b"application/json"
             else:  # /metrics or anything else
                 body = json.dumps(_metrics_snapshot()).encode()
                 ctype = b"application/json"
-            writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: " + ctype +
-                         b"\r\nContent-Length: " + str(len(body)).encode() +
-                         b"\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n" + body)
+            _reply(writer, body, ctype)
             await writer.drain()
         except Exception:
             pass
@@ -440,18 +555,23 @@ async def _self_stop():
 
 
 async def _idle_stop_loop():
-    # Self-stop after IDLE_STOP_S of ZERO capture sessions. A meeting keeps
+    # Self-stop after IDLE["seconds"] of ZERO capture sessions. A meeting keeps
     # active_connections>=1 (mic+system sockets), so this never fires mid-meeting.
     # Viewers (read-only browser tabs) do NOT count — capture sessions only.
-    if not settings.IDLE_STOP_ENABLED:
-        log.info("idle-stop disabled")
-        return
+    #
+    # IDLE is runtime-mutable (see /control/idle): the app can disable auto-stop
+    # entirely (keep the box up) or change the timeout live. So unlike before we
+    # do NOT return early when disabled — we keep looping and re-check every tick,
+    # which lets the user toggle it back ON without a redeploy.
     idle_since = None
     booted = _time.time()
-    log.info("idle-stop armed: stop after %ds idle, %ds boot grace",
-             settings.IDLE_STOP_S, settings.IDLE_GRACE_S)
+    log.info("idle-stop loop running: enabled=%s, stop after %ds idle, %ds boot grace",
+             IDLE["enabled"], IDLE["seconds"], settings.IDLE_GRACE_S)
     while True:
         await asyncio.sleep(settings.IDLE_CHECK_S)
+        if not IDLE["enabled"]:
+            idle_since = None          # disarmed: never accumulate idle time
+            continue
         if _time.time() - booted < settings.IDLE_GRACE_S:
             idle_since = None          # don't even arm the clock during grace
             continue
@@ -462,9 +582,9 @@ async def _idle_stop_loop():
         if idle_since is None:
             idle_since = _time.time()
             log.info("idle window started (no capture sessions)")
-        elif _time.time() - idle_since >= settings.IDLE_STOP_S:
+        elif _time.time() - idle_since >= IDLE["seconds"]:
             log.warning("idle %ds with zero capture sessions — self-stopping",
-                        settings.IDLE_STOP_S)
+                        IDLE["seconds"])
             await _self_stop()
             return
 
