@@ -109,29 +109,54 @@ async def run_asr(pcm: bytes, interim: bool):
 
 
 # Read-only viewers (browsers). Every capture connection's interim/final JSON is
-# fanned out to all of these. Broadcast mode: one app captures Zoom system audio,
-# the relay transcribes/translates ONCE, and many browsers watch the subtitles.
-VIEWERS: set = set()
+# fanned out to viewers IN THE SAME ROOM. Broadcast mode: one app captures Zoom
+# system audio, the relay transcribes/translates ONCE, and many browsers watch.
+#
+# ROOM ISOLATION: one box can host several INDEPENDENT meetings at once. Every
+# connection carries a room id (?room=... on the WS URL); a capture session's
+# subtitles only reach viewers in the SAME room. Two people in different rooms
+# (the app picks a distinct room per install) never see each other's captions.
+# Viewers are bucketed per room; the default room keeps old single-room links
+# working.
+DEFAULT_ROOM = "default"
+VIEWERS_BY_ROOM: dict[str, set] = {}
 
 
-async def broadcast(payload: dict):
-    # Fan one interim/final payload out to all viewers; drop dead sockets.
-    if not VIEWERS:
+def _total_viewers() -> int:
+    # Viewers across ALL rooms (for metrics + the idle-stop capture math).
+    return sum(len(s) for s in VIEWERS_BY_ROOM.values())
+
+
+async def broadcast(payload: dict, room: str):
+    # Fan one interim/final payload out to viewers IN `room`; drop dead sockets.
+    viewers = VIEWERS_BY_ROOM.get(room)
+    if not viewers:
         return
     data = json.dumps(payload)
     dead = []
-    for v in VIEWERS:
+    for v in viewers:
         try:
             await v.send(data)
         except Exception:
             dead.append(v)
     for v in dead:
-        VIEWERS.discard(v)
+        viewers.discard(v)
 
 
 def _ws_path(ws) -> str:
     return (getattr(getattr(ws, "request", None), "path", None)
             or getattr(ws, "path", "") or "")
+
+
+def _ws_room(ws) -> str:
+    # The meeting/room id from ?room=... — partitions captures and viewers so
+    # concurrent meetings on one box stay isolated. Empty -> DEFAULT_ROOM.
+    from urllib.parse import urlparse, parse_qs
+    try:
+        r = (parse_qs(urlparse(_ws_path(ws)).query).get("room") or [""])[0].strip()
+        return r or DEFAULT_ROOM
+    except Exception:
+        return DEFAULT_ROOM
 
 
 def _is_viewer(ws) -> bool:
@@ -190,10 +215,12 @@ async def handle(ws):
 
 
 async def _handle_viewer(ws):
-    # Read-only subscriber: receives broadcasts, sends nothing meaningful.
+    # Read-only subscriber: receives broadcasts for ITS ROOM only.
     peer = getattr(ws, "remote_address", "?")
-    VIEWERS.add(ws)
-    log.info("viewer connected: %s (viewers=%d)", peer, len(VIEWERS))
+    room = _ws_room(ws)
+    viewers = VIEWERS_BY_ROOM.setdefault(room, set())
+    viewers.add(ws)
+    log.info("viewer connected: %s room=%s (room viewers=%d)", peer, room, len(viewers))
     try:
         await ws.send(json.dumps({"type": "ready", "role": "viewer"}))
         async for _ in ws:      # ignore anything a viewer sends; keepalive read
@@ -201,13 +228,16 @@ async def _handle_viewer(ws):
     except websockets.ConnectionClosed:
         pass
     finally:
-        VIEWERS.discard(ws)
-        log.info("viewer disconnected: %s (viewers=%d)", peer, len(VIEWERS))
+        viewers.discard(ws)
+        if not viewers:
+            VIEWERS_BY_ROOM.pop(room, None)   # don't leak empty room buckets
+        log.info("viewer disconnected: %s room=%s", peer, room)
 
 
 async def _handle(ws):
     peer = getattr(ws, "remote_address", "?")
-    log.info("client connected: %s", peer)
+    room = _ws_room(ws)           # this capture's meeting; its finals go here only
+    log.info("client connected: %s room=%s", peer, room)
     seg = Segmenter()
     tr = Translator()
     pair: tuple[str, str] = ("ko", "ja")
@@ -260,7 +290,7 @@ async def _handle(ws):
                 "stream": stream,
             }
             await ws.send(json.dumps(payload))   # to the capture client (app UI)
-            await broadcast(payload)             # to all read-only viewers
+            await broadcast(payload, room)       # to viewers in THIS room only
         except Exception as e:  # noqa
             if is_final:
                 METRICS["finals_dropped"] += 1
@@ -344,7 +374,8 @@ def _metrics_snapshot() -> dict:
             "endpoint": dict(ENDPOINT),              # live sentence-seg knobs
             "uptime_s": int(_time.time() - _START_TS),
             "asr_workers": settings.ASR_WORKERS,
-            "viewers": len(VIEWERS)}
+            "viewers": _total_viewers(),
+            "rooms": len(VIEWERS_BY_ROOM)}
 
 
 def _load_viewer_html() -> bytes:
@@ -640,7 +671,7 @@ async def _idle_stop_loop():
         if _time.time() - booted < settings.IDLE_GRACE_S:
             idle_since = None          # don't even arm the clock during grace
             continue
-        capture = METRICS["active_connections"] - len(VIEWERS)
+        capture = METRICS["active_connections"] - _total_viewers()
         if capture > 0 or METRICS["asr_inflight"] > 0:
             idle_since = None
             continue

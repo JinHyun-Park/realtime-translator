@@ -34,6 +34,14 @@ struct ControlPanel: View {
                         SecureField("접속 비밀번호 / access password", text: $model.accessKey)
                             .textFieldStyle(.roundedBorder)
                             .disabled(model.running)
+                        HStack(spacing: 6) {
+                            Text("방").font(.caption).foregroundStyle(.secondary)
+                            TextField("room", text: $model.roomID)
+                                .textFieldStyle(.roundedBorder)
+                                .disabled(model.running)
+                        }
+                        Text("같은 서버를 여러 명이 써도 '방'이 다르면 자막이 격리돼요. 함께 보려면 같은 방으로 맞추세요.")
+                            .font(.caption2).foregroundStyle(.secondary)
                         HStack {
                             Circle()
                                 .fill(model.connected ? .green : .secondary)

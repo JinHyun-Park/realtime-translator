@@ -158,6 +158,21 @@ final class AppModel: ObservableObject {
     @Published var accessKey: String = UserDefaults.standard.string(forKey: "accessKey") ?? "" {
         didSet { UserDefaults.standard.set(accessKey, forKey: "accessKey") }
     }
+    // Room/meeting id — appended as ?room=... so concurrent users on the SAME box
+    // stay ISOLATED (each app install gets its own stable random room, so two
+    // people in different meetings never see each other's subtitles). Editable so
+    // teammates who WANT to share one broadcast can type the same room. Persisted.
+    @Published var roomID: String = {
+        if let r = UserDefaults.standard.string(forKey: "roomID"), !r.isEmpty { return r }
+        let r = "r-" + UUID().uuidString.prefix(8).lowercased()
+        UserDefaults.standard.set(r, forKey: "roomID")
+        return r
+    }() {
+        didSet {
+            let v = roomID.trimmingCharacters(in: .whitespaces)
+            UserDefaults.standard.set(v.isEmpty ? "default" : v, forKey: "roomID")
+        }
+    }
     @Published var connected = false
     @Published var running = false
     @Published var status = "Idle"
@@ -359,18 +374,25 @@ final class AppModel: ObservableObject {
         return comp.url
     }
 
+    /// The room id actually sent on the wire: trimmed, or "default" if blank.
+    var effectiveRoom: String {
+        let v = roomID.trimmingCharacters(in: .whitespaces)
+        return v.isEmpty ? "default" : v
+    }
+
     /// Open the broadcast viewer page (`/view`) in the default browser — the same
     /// live-subtitle page teammates use. The password rides as `?key=...` so it
     /// connects without prompting (viewer.html reads `key`, saves to localStorage).
-    /// This opens on YOUR machine, so embedding the token is fine; to hand the URL
-    /// to others, share the bare `/view` link and let them type the password.
+    /// `room` MUST match this capture's room or the viewer sees nothing. This opens
+    /// on YOUR machine, so embedding the token is fine; to hand the URL to others,
+    /// share it (it carries the room) and let them type the password.
     func openViewerPage() {
         guard let base = httpBase() else { status = "서버 주소 오류"; return }
         var comp = URLComponents(url: base.appendingPathComponent("view"),
                                  resolvingAgainstBaseURL: false)
-        if !accessKey.isEmpty {
-            comp?.queryItems = [URLQueryItem(name: "key", value: accessKey)]
-        }
+        var q = [URLQueryItem(name: "room", value: effectiveRoom)]
+        if !accessKey.isEmpty { q.append(URLQueryItem(name: "key", value: accessKey)) }
+        comp?.queryItems = q
         guard let url = comp?.url else { status = "뷰어 URL 생성 실패"; return }
         rtlog("openViewerPage \(url.absoluteString)")
         NSWorkspace.shared.open(url)
@@ -661,13 +683,13 @@ final class AppModel: ObservableObject {
 
     func start() {
         rtlog("start() called; url=\(serverURL) micOn=\(captureMic) sysOn=\(captureSystemAudio) inputID=\(String(describing: selectedInputID)) screenPreflight=\(CGPreflightScreenCaptureAccess()) pid=\(ProcessInfo.processInfo.processIdentifier)")
-        // Append the access token as a query param (the relay validates it).
+        // Append the access token + room as query params (the relay validates the
+        // token and isolates this capture's subtitles to its room).
         var comp = URLComponents(string: serverURL)
-        if !accessKey.isEmpty {
-            var q = comp?.queryItems ?? []
-            q.append(URLQueryItem(name: "token", value: accessKey))
-            comp?.queryItems = q
-        }
+        var q = comp?.queryItems ?? []
+        if !accessKey.isEmpty { q.append(URLQueryItem(name: "token", value: accessKey)) }
+        q.append(URLQueryItem(name: "room", value: effectiveRoom))
+        comp?.queryItems = q
         guard let url = comp?.url else {
             status = "Bad server URL"; return
         }

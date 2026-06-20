@@ -48,10 +48,14 @@
     return k;
   }
   var rtKey = getKey();
+  // Room/meeting id from ?room=... — must match the capture's room to receive
+  // its subtitles (concurrent meetings on one box are isolated by room).
+  var rtRoom = new URLSearchParams(location.search).get("room") || "default";
   // Same host as the page; CloudFront routes /viewsock to the relay WS.
   function buildURL() {
     return (location.protocol === "https:" ? "wss://" : "ws://")
-      + location.host + "/viewsock?token=" + encodeURIComponent(rtKey);
+      + location.host + "/viewsock?token=" + encodeURIComponent(rtKey)
+      + "&room=" + encodeURIComponent(rtRoom);
   }
   var interimNodes = {};   // (stream:seq) -> node, for in-place interim updates
   var ws, backoff = 500;
