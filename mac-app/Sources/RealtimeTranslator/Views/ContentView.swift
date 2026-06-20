@@ -7,11 +7,11 @@ struct ContentView: View {
     var body: some View {
         HSplitView {
             ControlPanel()
-                .frame(minWidth: 280, maxWidth: 340)
+                .frame(minWidth: 320, idealWidth: 440, maxWidth: 520)
             TranscriptView()
-                .frame(minWidth: 460)
+                .frame(minWidth: 440)
         }
-        .frame(minWidth: 820, minHeight: 520)
+        .frame(minWidth: 900, minHeight: 560)
     }
 }
 
@@ -334,7 +334,7 @@ struct InsightPanel: View {
                     if !model.liveSummary.isEmpty || !model.suggestedQuestions.isEmpty {
                         Divider()
                         SelectableText(attributed: liveResultAttributed())
-                            .frame(height: 150)
+                            .frame(minHeight: 320)
                             .overlay(RoundedRectangle(cornerRadius: 5).stroke(.quaternary))
                     }
 
@@ -349,7 +349,7 @@ struct InsightPanel: View {
                     // Final wrap — also one selectable block.
                     if !model.finalSummary.isEmpty || !model.keyPoints.isEmpty || !model.nextActions.isEmpty {
                         SelectableText(attributed: finalResultAttributed())
-                            .frame(height: 200)
+                            .frame(minHeight: 380)
                             .overlay(RoundedRectangle(cornerRadius: 5).stroke(.quaternary))
                     }
 
@@ -362,15 +362,16 @@ struct InsightPanel: View {
     }
 
     // Combine the live summary + questions into ONE attributed block so the
-    // whole thing is a single drag-selectable surface.
+    // whole thing is a single drag-selectable surface. A blank line separates
+    // each section so the summary and questions are visually distinct.
     private func liveResultAttributed() -> NSAttributedString {
         let s = NSMutableAttributedString()
         if !model.liveSummary.isEmpty {
-            s.append(InsightStyle.heading("지금까지 요약"))
+            s.append(InsightStyle.heading("지금까지 요약", first: true))
             s.append(InsightStyle.body(model.liveSummary + "\n"))
         }
         if !model.suggestedQuestions.isEmpty {
-            s.append(InsightStyle.heading("추천 질문"))
+            s.append(InsightStyle.heading("추천 질문", first: s.length == 0))
             for q in model.suggestedQuestions { s.append(InsightStyle.bullet(q, marker: "• ")) }
         }
         return s
@@ -379,15 +380,15 @@ struct InsightPanel: View {
     private func finalResultAttributed() -> NSAttributedString {
         let s = NSMutableAttributedString()
         if !model.finalSummary.isEmpty {
-            s.append(InsightStyle.heading("핵심 요약"))
+            s.append(InsightStyle.heading("핵심 요약", first: true))
             s.append(InsightStyle.body(model.finalSummary + "\n"))
         }
         if !model.keyPoints.isEmpty {
-            s.append(InsightStyle.heading("핵심 포인트"))
+            s.append(InsightStyle.heading("핵심 포인트", first: s.length == 0))
             for p in model.keyPoints { s.append(InsightStyle.bullet(p, marker: "• ")) }
         }
         if !model.nextActions.isEmpty {
-            s.append(InsightStyle.heading("다음 액션"))
+            s.append(InsightStyle.heading("다음 액션", first: s.length == 0))
             for a in model.nextActions { s.append(InsightStyle.bullet(a, marker: "→ ")) }
         }
         return s
@@ -396,8 +397,10 @@ struct InsightPanel: View {
 
 /// Attributed-string styling for the insight blocks (headings, body, bullets).
 enum InsightStyle {
-    static func heading(_ t: String) -> NSAttributedString {
-        NSAttributedString(string: t + "\n", attributes: [
+    /// `first` = is this the first heading in the block? If not, prepend a blank
+    /// line so each section (summary / questions / etc.) is visually separated.
+    static func heading(_ t: String, first: Bool) -> NSAttributedString {
+        NSAttributedString(string: (first ? "" : "\n") + t + "\n", attributes: [
             .font: NSFont.systemFont(ofSize: 11, weight: .semibold),
             .foregroundColor: NSColor.secondaryLabelColor,
         ])
