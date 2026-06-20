@@ -129,10 +129,14 @@ struct Line: Identifiable {
 @MainActor
 final class AppModel: ObservableObject {
     // Connection
-    // Default points at the SSM port-forward (deploy/connect.sh maps 18765 -> Tokyo:8765).
-    // Team deployment: CloudFront edge (wss). For local dev via SSM tunnel use
-    // ws://localhost:18765. Editable at runtime in the server field.
-    @Published var serverURL = "wss://dv7fu8km0bcfp.cloudfront.net"
+    // The relay URL. Persisted so each user types their own CloudFront/host once
+    // and it sticks across launches (others deploying their own box just set it
+    // once). Falls back to a sensible default only on first run.
+    // For local dev via SSM tunnel use ws://localhost:18765.
+    @Published var serverURL: String = UserDefaults.standard.string(forKey: "serverURL")
+        ?? "wss://dv7fu8km0bcfp.cloudfront.net" {
+        didSet { UserDefaults.standard.set(serverURL, forKey: "serverURL") }
+    }
     // Access password (shared token). Appended as ?token=... on connect.
     // Persisted so the user types it once.
     @Published var accessKey: String = UserDefaults.standard.string(forKey: "accessKey") ?? "" {
@@ -228,16 +232,43 @@ final class AppModel: ObservableObject {
     private var finalsSinceInsight = 0
 
     // Language pair (KO<->JA default). The relay auto-detects which side spoke.
-    @Published var langA = "ko"
-    @Published var langB = "ja"
+    // Persisted so your chosen pair sticks instead of resetting to KO/JA each launch.
+    @Published var langA: String = UserDefaults.standard.string(forKey: "langA") ?? "ko" {
+        didSet { UserDefaults.standard.set(langA, forKey: "langA") }
+    }
+    @Published var langB: String = UserDefaults.standard.string(forKey: "langB") ?? "ja" {
+        didSet { UserDefaults.standard.set(langB, forKey: "langB") }
+    }
 
-    // Audio sources
-    @Published var captureSystemAudio = true
-    @Published var captureMic = true
+    // Audio sources — persisted so your capture choices stick across launches.
+    @Published var captureSystemAudio: Bool =
+        (UserDefaults.standard.object(forKey: "captureSystemAudio") as? Bool ?? true) {
+        didSet { UserDefaults.standard.set(captureSystemAudio, forKey: "captureSystemAudio") }
+    }
+    @Published var captureMic: Bool =
+        (UserDefaults.standard.object(forKey: "captureMic") as? Bool ?? true) {
+        didSet { UserDefaults.standard.set(captureMic, forKey: "captureMic") }
+    }
     @Published var inputDevices: [AudioDevice] = []
     @Published var outputDevices: [AudioDevice] = []
-    @Published var selectedInputID: AudioDeviceID?
-    @Published var selectedOutputID: AudioDeviceID?   // for monitoring choice
+    // Selected audio devices, persisted by device UID-ish ID. NOTE: AudioDeviceID
+    // is a runtime handle that CAN change across reboots/replug; we restore it
+    // only if the saved ID still exists in the enumerated device list (see
+    // refreshDevices), otherwise we fall back to the system default.
+    @Published var selectedInputID: AudioDeviceID? =
+        (UserDefaults.standard.object(forKey: "selectedInputID") as? UInt32).map { AudioDeviceID($0) } {
+        didSet {
+            if let id = selectedInputID { UserDefaults.standard.set(Int(id), forKey: "selectedInputID") }
+            else { UserDefaults.standard.removeObject(forKey: "selectedInputID") }
+        }
+    }
+    @Published var selectedOutputID: AudioDeviceID? =
+        (UserDefaults.standard.object(forKey: "selectedOutputID") as? UInt32).map { AudioDeviceID($0) } {
+        didSet {
+            if let id = selectedOutputID { UserDefaults.standard.set(Int(id), forKey: "selectedOutputID") }
+            else { UserDefaults.standard.removeObject(forKey: "selectedOutputID") }
+        }
+    }
 
     // Transcript
     @Published var lines: [Line] = []
