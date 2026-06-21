@@ -85,7 +85,7 @@ async def archive_session(meta: dict, day: str, epoch_ms: int,
         convo = [f"{('ME' if x.get('stream')=='mic' else 'THEM')}: "
                  f"{x.get('translation') or x.get('source','')}" for x in lines]
         if convo:
-            summary = await generate_insight("", convo, "final")
+            summary = await generate_insight("", convo, "final", meta.get("lang", "ko"))
     except Exception as e:
         log.warning("archive summary failed: %s", e.__class__.__name__)
         summary = {"error": "summary generation failed"}

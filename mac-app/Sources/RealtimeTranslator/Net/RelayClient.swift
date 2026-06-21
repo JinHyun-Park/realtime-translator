@@ -30,6 +30,9 @@ final class RelayClient: NSObject, URLSessionWebSocketDelegate {
     private var active = false              // user wants the session up
     private var url: URL?
     private var pair: (String, String) = ("ko", "ja")
+    /// App UI language (ko/ja/en) — sent in the config frame so the server's
+    /// end-of-session summary comes back in the same language. Set before start.
+    var uiLang: String = "ko"
     private var reconnectDelay: TimeInterval = 0.5
     private var generation = 0              // invalidates stale receive loops
 
@@ -67,7 +70,7 @@ final class RelayClient: NSObject, URLSessionWebSocketDelegate {
 
     func setPair(_ a: String, _ b: String) {
         pair = (a, b)
-        sendJSON(["type": "config", "pair": [a, b], "stream": streamTag])
+        sendJSON(["type": "config", "pair": [a, b], "stream": streamTag, "lang": uiLang])
     }
 
     func sendAudio(_ data: Data) {
@@ -96,7 +99,7 @@ final class RelayClient: NSObject, URLSessionWebSocketDelegate {
                         self.reconnectDelay = 0.5          // reset backoff
                         self.setConnected(true)
                         // Re-assert our language pair + stream tag after a (re)connect.
-                        self.sendJSON(["type": "config", "pair": [self.pair.0, self.pair.1], "stream": self.streamTag])
+                        self.sendJSON(["type": "config", "pair": [self.pair.0, self.pair.1], "stream": self.streamTag, "lang": self.uiLang])
                     }
                     DispatchQueue.main.async { self.onMessage?(decoded) }
                 }

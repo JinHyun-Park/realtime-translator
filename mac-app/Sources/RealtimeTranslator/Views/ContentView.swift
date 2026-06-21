@@ -22,8 +22,18 @@ struct ControlPanel: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                Text("Realtime Translator")
-                    .font(.title2).bold()
+                HStack {
+                    Text("Realtime Translator")
+                        .font(.title2).bold()
+                    Spacer()
+                    // App UI language (ko/ja/en) — relabels the whole UI + sets
+                    // the language insight/summaries come back in.
+                    Picker("", selection: $model.uiLanguage) {
+                        ForEach(UILang.allCases) { Text($0.label).tag($0) }
+                    }
+                    .labelsHidden().frame(width: 110)
+                    .help(L10n.t("lang.title"))
+                }
 
                 // Connection
                 GroupBox("Server") {
@@ -31,22 +41,22 @@ struct ControlPanel: View {
                         TextField("ws://host:8765", text: $model.serverURL)
                             .textFieldStyle(.roundedBorder)
                             .disabled(model.running)
-                        SecureField("접속 비밀번호 / access password", text: $model.accessKey)
+                        SecureField(L10n.t("server.password"), text: $model.accessKey)
                             .textFieldStyle(.roundedBorder)
                             .disabled(model.running)
                         HStack(spacing: 6) {
-                            Text("방").font(.caption).foregroundStyle(.secondary)
+                            Text(L10n.t("server.room")).font(.caption).foregroundStyle(.secondary)
                             TextField("room", text: $model.roomID)
                                 .textFieldStyle(.roundedBorder)
                                 .disabled(model.running)
                         }
                         HStack(spacing: 6) {
-                            Text("방 비번").font(.caption).foregroundStyle(.secondary)
-                            SecureField("선택 (비우면 공개 방)", text: $model.roomSecret)
+                            Text(L10n.t("server.roomSecret")).font(.caption).foregroundStyle(.secondary)
+                            SecureField(L10n.t("server.roomSecret.ph"), text: $model.roomSecret)
                                 .textFieldStyle(.roundedBorder)
                                 .disabled(model.running)
                         }
-                        Text("같은 서버를 여러 명이 써도 '방'이 다르면 자막이 격리돼요. 함께 보려면 같은 방+방비번으로 맞추세요. 방 비번을 처음 설정한 사람이 그 방 주인이 됩니다.")
+                        Text(L10n.t("server.room.help"))
                             .font(.caption2).foregroundStyle(.secondary)
                         HStack {
                             Circle()
@@ -66,20 +76,20 @@ struct ControlPanel: View {
                         Button {
                             model.openViewerPage()
                         } label: {
-                            Label("브라우저로 자막 보기 (/view)", systemImage: "safari")
+                            Label(L10n.t("server.viewBrowser"), systemImage: "safari")
                                 .frame(maxWidth: .infinity)
                         }
                         .controlSize(.regular)
-                        Text("팀원과 함께 볼 땐 이 페이지 주소를 공유하세요 (비번 입력하면 시청).")
+                        Text(L10n.t("server.viewBrowser.help"))
                             .font(.caption2).foregroundStyle(.secondary)
                         Button {
                             model.openHistoryPage()
                         } label: {
-                            Label("지난 회의 기록 보기 (전사·요약)", systemImage: "clock.arrow.circlepath")
+                            Label(L10n.t("server.history"), systemImage: "clock.arrow.circlepath")
                                 .frame(maxWidth: .infinity)
                         }
                         .controlSize(.regular)
-                        Text("이 방의 끝난 회의들의 전체 전사와 요약·다음 액션을 브라우저에서 봅니다.")
+                        Text(L10n.t("server.history.help"))
                             .font(.caption2).foregroundStyle(.secondary)
                     }.padding(6)
                 }
@@ -90,15 +100,15 @@ struct ControlPanel: View {
                 // OFF; cost is managed out-of-band by the operator.)
 
                 // Translation model — local Qwen vs Claude Sonnet 4.6 (Bedrock).
-                GroupBox("번역 모델") {
+                GroupBox(L10n.t("model.title")) {
                     VStack(alignment: .leading, spacing: 8) {
-                        Toggle("Claude Sonnet 4.6 사용 (정확도 ↑)", isOn: $model.useClaude)
+                        Toggle(L10n.t("model.claude"), isOn: $model.useClaude)
                             .onChange(of: model.useClaude) { _ in
                                 model.applyLLMSetting()
                             }
                         Text(model.useClaude
-                             ? "클라우드 번역(Bedrock). 더 정확하지만 호출당 과금 + 인터넷 필요. 일시 폭주 시 자동으로 Qwen으로 폴백."
-                             : "로컬 Qwen 3-32B. 무료·오프라인, 정확도는 Claude보다 한 수 아래.")
+                             ? L10n.t("model.claude.help")
+                             : L10n.t("model.qwen.help"))
                             .font(.caption2).foregroundStyle(.secondary)
                         if !model.llmControlStatus.isEmpty {
                             Text(model.llmControlStatus)
@@ -110,10 +120,10 @@ struct ControlPanel: View {
                 // Sentence endpointing — how aggressively to break + translate.
                 // Lower silence = snappier (translates sooner); punctuation
                 // early-finalize lets a long no-pause monologue break per sentence.
-                GroupBox("문장 끊기 (반응 속도)") {
+                GroupBox(L10n.t("endpoint.title")) {
                     VStack(alignment: .leading, spacing: 8) {
                         HStack {
-                            Text("침묵 민감도").font(.caption)
+                            Text(L10n.t("endpoint.silence")).font(.caption)
                             Spacer()
                             Text("\(model.minSilenceMs)ms")
                                 .font(.caption2).monospaced().foregroundStyle(.secondary)
@@ -122,25 +132,25 @@ struct ControlPanel: View {
                             get: { Double(model.minSilenceMs) },
                             set: { model.minSilenceMs = Int(($0 / 50).rounded()) * 50 }
                         ), in: 300...1500, step: 50) {
-                            Text("침묵 민감도")
+                            Text(L10n.t("endpoint.silence"))
                         } minimumValueLabel: {
-                            Text("빠름").font(.caption2)
+                            Text(L10n.t("endpoint.fast")).font(.caption2)
                         } maximumValueLabel: {
-                            Text("신중").font(.caption2)
+                            Text(L10n.t("endpoint.careful")).font(.caption2)
                         }
                         .onChange(of: model.minSilenceMs) { _ in
                             model.applyEndpointSetting()
                         }
-                        Text("작을수록 말 끝나자마자 번역(빠름), 클수록 더 기다림(느리지만 안 잘림).")
+                        Text(L10n.t("endpoint.silence.help"))
                             .font(.caption2).foregroundStyle(.secondary)
                         Divider()
-                        Toggle("구두점에서 문장 조기 확정", isOn: $model.punctEnabled)
+                        Toggle(L10n.t("endpoint.punct"), isOn: $model.punctEnabled)
                             .onChange(of: model.punctEnabled) { _ in
                                 model.applyEndpointSetting()
                             }
                         Text(model.punctEnabled
-                             ? "안 쉬고 길게 말해도 한 문장 끝(. 。 ? !)이 보이면 바로 끊어 번역해요."
-                             : "구두점 무시 — 침묵이 생길 때까지만 기다립니다.")
+                             ? L10n.t("endpoint.punct.on.help")
+                             : L10n.t("endpoint.punct.off.help"))
                             .font(.caption2).foregroundStyle(.secondary)
                         if !model.endpointControlStatus.isEmpty {
                             Text(model.endpointControlStatus)
@@ -242,12 +252,12 @@ struct StartControl: View {
                 VStack(spacing: 8) {
                     HStack(spacing: 8) {
                         ProgressView().controlSize(.small)
-                        Text(model.wakeDetail.isEmpty ? "서버 준비 중…" : model.wakeDetail)
+                        Text(model.wakeDetail.isEmpty ? L10n.t("start.preparing") : model.wakeDetail)
                             .font(.callout)
                             .fixedSize(horizontal: false, vertical: true)
                     }.frame(maxWidth: .infinity, alignment: .leading)
                     Button(action: { model.cancelWake() }) {
-                        Text("취소").frame(maxWidth: .infinity)
+                        Text(L10n.t("start.cancel")).frame(maxWidth: .infinity)
                     }.controlSize(.regular)
                 }
                 .padding(10)
@@ -267,7 +277,7 @@ struct StartControl: View {
                         .foregroundStyle(.red)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                Text("서버가 꺼져 있으면 깨우고, 준비되면 자동으로 시작해요 (최대 ~6분).")
+                Text(L10n.t("start.wake.help"))
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -284,38 +294,38 @@ struct InsightPanel: View {
     @EnvironmentObject var model: AppModel
 
     var body: some View {
-        GroupBox("라이브 인사이트 (회의 코파일럿)") {
+        GroupBox(L10n.t("insight.title")) {
             VStack(alignment: .leading, spacing: 8) {
-                Toggle("실시간 인사이트 켜기", isOn: $model.insightEnabled)
+                Toggle(L10n.t("insight.enable"), isOn: $model.insightEnabled)
                 Text(model.insightEnabled
-                     ? "대화가 쌓이면 요약·추천 질문을 자동 갱신해요 (Claude 호출, 켰을 때만 과금)."
-                     : "꺼져 있어요 — 서버를 호출하지 않아 추가 비용이 없습니다.")
+                     ? L10n.t("insight.on.help")
+                     : L10n.t("insight.off.help"))
                     .font(.caption2).foregroundStyle(.secondary)
 
                 if model.insightEnabled {
                     Divider()
                     // Context: who am I, what to focus on. Feeds the system prompt.
-                    Text("컨텍스트 (내 역할·중점)").font(.caption).foregroundStyle(.secondary)
+                    Text(L10n.t("insight.context")).font(.caption).foregroundStyle(.secondary)
                     TextEditor(text: $model.insightContext)
                         .font(.callout)
                         .frame(height: 56)
                         .overlay(RoundedRectangle(cornerRadius: 5).stroke(.quaternary))
                         .overlay(alignment: .topLeading) {
                             if model.insightContext.isEmpty {
-                                Text("예: 나는 백엔드 시니어 면접관이다. 시스템 설계 깊이와 트레이드오프 사고를 본다.")
+                                Text(L10n.t("insight.context.ph"))
                                     .font(.caption2).foregroundStyle(.tertiary)
                                     .padding(.horizontal, 5).padding(.vertical, 8)
                                     .allowsHitTesting(false)
                             }
                         }
                     HStack {
-                        Text("갱신 주기").font(.caption)
+                        Text(L10n.t("insight.interval")).font(.caption)
                         Picker("", selection: $model.insightEveryN) {
-                            Text("문장 3개").tag(3)
-                            Text("5개").tag(5)
-                            Text("8개").tag(8)
-                            Text("12개").tag(12)
-                        }.labelsHidden().frame(width: 100)
+                            Text(L10n.t("insight.sentences", 3)).tag(3)
+                            Text(L10n.t("insight.sentences", 5)).tag(5)
+                            Text(L10n.t("insight.sentences", 8)).tag(8)
+                            Text(L10n.t("insight.sentences", 12)).tag(12)
+                        }.labelsHidden().frame(width: 110)
                         Spacer()
                         if model.insightBusy { ProgressView().controlSize(.small) }
                     }
@@ -333,7 +343,7 @@ struct InsightPanel: View {
                     Button {
                         model.finishAndSummarize()
                     } label: {
-                        Label("마무리 정리 (핵심 + 다음 액션)", systemImage: "checkmark.seal")
+                        Label(L10n.t("insight.wrap"), systemImage: "checkmark.seal")
                             .frame(maxWidth: .infinity)
                     }.controlSize(.regular).disabled(model.insightBusy)
 
@@ -358,11 +368,11 @@ struct InsightPanel: View {
     private func liveResultAttributed() -> NSAttributedString {
         let s = NSMutableAttributedString()
         if !model.liveSummary.isEmpty {
-            s.append(InsightStyle.heading("지금까지 요약", first: true))
+            s.append(InsightStyle.heading(L10n.t("insight.summaryNow"), first: true))
             s.append(InsightStyle.body(model.liveSummary + "\n"))
         }
         if !model.suggestedQuestions.isEmpty {
-            s.append(InsightStyle.heading("추천 질문", first: s.length == 0))
+            s.append(InsightStyle.heading(L10n.t("insight.questions"), first: s.length == 0))
             for q in model.suggestedQuestions { s.append(InsightStyle.bullet(q, marker: "• ")) }
         }
         return s
@@ -371,15 +381,15 @@ struct InsightPanel: View {
     private func finalResultAttributed() -> NSAttributedString {
         let s = NSMutableAttributedString()
         if !model.finalSummary.isEmpty {
-            s.append(InsightStyle.heading("핵심 요약", first: true))
+            s.append(InsightStyle.heading(L10n.t("insight.keySummary"), first: true))
             s.append(InsightStyle.body(model.finalSummary + "\n"))
         }
         if !model.keyPoints.isEmpty {
-            s.append(InsightStyle.heading("핵심 포인트", first: s.length == 0))
+            s.append(InsightStyle.heading(L10n.t("insight.keyPoints"), first: s.length == 0))
             for p in model.keyPoints { s.append(InsightStyle.bullet(p, marker: "• ")) }
         }
         if !model.nextActions.isEmpty {
-            s.append(InsightStyle.heading("다음 액션", first: s.length == 0))
+            s.append(InsightStyle.heading(L10n.t("insight.nextActions"), first: s.length == 0))
             for a in model.nextActions { s.append(InsightStyle.bullet(a, marker: "→ ")) }
         }
         return s

@@ -289,7 +289,7 @@ async def _handle(ws):
     stream: str | None = None     # "me" | "them" — set via config, tags broadcasts
     # Register this capture session for operator metrics (metadata only).
     _started = _time.time()
-    cap_info = {"stream": None, "pair": list(pair), "finals": 0,
+    cap_info = {"stream": None, "pair": list(pair), "finals": 0, "lang": "ko",
                 "started_ts": _started, "last_ts": _started}
     CAPTURES_BY_ROOM.setdefault(room, []).append(cap_info)
     # Accumulate this session's finalized lines in memory (capped) for the
@@ -407,6 +407,9 @@ async def _handle(ws):
                         if s in ("me", "them"):
                             stream = s
                             cap_info["stream"] = s          # operator metric
+                        lg = msg.get("lang")
+                        if lg in ("ko", "ja", "en"):
+                            cap_info["lang"] = lg           # UI lang -> summary lang
                     elif msg.get("type") == "end":
                         await dispatch(seg.flush())
             except websockets.ConnectionClosed:
@@ -440,6 +443,7 @@ async def _handle(ws):
                 "room": room,
                 "stream": cap_info["stream"],
                 "pair": cap_info["pair"],
+                "lang": cap_info.get("lang", "ko"),
                 "finals": cap_info["finals"],
                 "started_ms": int(cap_info["started_ts"] * 1000),
                 "ended_ms": int(ended * 1000),
@@ -761,6 +765,7 @@ async def _serve_http(port: int = 9000):
                     return
                 mode = data.get("mode") if data.get("mode") in ("live", "final") else "live"
                 context = str(data.get("context", ""))
+                lang = data.get("lang") if data.get("lang") in ("ko", "ja", "en") else "ko"
                 transcript = data.get("transcript") or []
                 if not isinstance(transcript, list):
                     transcript = []
@@ -770,7 +775,7 @@ async def _serve_http(port: int = 9000):
                        else settings.INSIGHT_LIVE_TRANSCRIPT_LINES)
                 lines = [str(x) for x in transcript][-cap:]
                 from translator import generate_insight
-                result = await generate_insight(context, lines, mode)
+                result = await generate_insight(context, lines, mode, lang)
                 body = json.dumps({"mode": mode, **result}).encode()
                 ctype = b"application/json"
             else:  # /metrics or anything else

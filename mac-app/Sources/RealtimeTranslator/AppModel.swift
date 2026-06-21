@@ -188,6 +188,22 @@ final class AppModel: ObservableObject {
     @Published var roomSecret: String = UserDefaults.standard.string(forKey: "roomSecret") ?? "" {
         didSet { UserDefaults.standard.set(roomSecret, forKey: "roomSecret") }
     }
+    // App UI language (ko/ja/en). Persisted; drives L10n + the language sent to
+    // the server so insight/summary come back in the same language. Defaults to
+    // the macOS preferred language if it's one we support, else Korean.
+    @Published var uiLanguage: UILang = {
+        if let saved = UserDefaults.standard.string(forKey: "uiLanguage"),
+           let l = UILang(rawValue: saved) { return l }
+        let pref = Locale.preferredLanguages.first ?? "ko"
+        let l: UILang = pref.hasPrefix("ja") ? .ja : (pref.hasPrefix("en") ? .en : .ko)
+        return l
+    }() {
+        didSet {
+            UserDefaults.standard.set(uiLanguage.rawValue, forKey: "uiLanguage")
+            L10n.lang = uiLanguage
+            objectWillChange.send()   // re-render all views in the new language
+        }
+    }
     @Published var connected = false
     @Published var running = false
     @Published var status = "Idle"
@@ -333,6 +349,7 @@ final class AppModel: ObservableObject {
     private var epoch = 0
 
     init() {
+        L10n.lang = uiLanguage          // localize from the very first render
         refreshDevices()
         // Keep the input/output pickers live: re-enumerate whenever a device is
         // plugged in/out or the system default changes.
@@ -405,14 +422,14 @@ final class AppModel: ObservableObject {
     /// on YOUR machine, so embedding the token is fine; to hand the URL to others,
     /// share it (it carries the room) and let them type the password.
     func openViewerPage() {
-        guard let base = httpBase() else { status = "서버 주소 오류"; return }
+        guard let base = httpBase() else { status = L10n.t("st.serverURLError"); return }
         var comp = URLComponents(url: base.appendingPathComponent("view"),
                                  resolvingAgainstBaseURL: false)
         var q = [URLQueryItem(name: "room", value: effectiveRoom)]
         if !accessKey.isEmpty { q.append(URLQueryItem(name: "key", value: accessKey)) }
         if !roomSecret.isEmpty { q.append(URLQueryItem(name: "rs", value: roomSecret)) }
         comp?.queryItems = q
-        guard let url = comp?.url else { status = "뷰어 URL 생성 실패"; return }
+        guard let url = comp?.url else { status = L10n.t("st.viewerURLFail"); return }
         rtlog("openViewerPage \(url.absoluteString)")
         NSWorkspace.shared.open(url)
     }
@@ -421,14 +438,15 @@ final class AppModel: ObservableObject {
     /// browser. Carries room + password (+ room secret if set) so it opens without
     /// prompting. Shows only this room's sessions (server enforces room match).
     func openHistoryPage() {
-        guard let base = httpBase() else { status = "서버 주소 오류"; return }
+        guard let base = httpBase() else { status = L10n.t("st.serverURLError"); return }
         var comp = URLComponents(url: base.appendingPathComponent("history"),
                                  resolvingAgainstBaseURL: false)
-        var q = [URLQueryItem(name: "room", value: effectiveRoom)]
+        var q = [URLQueryItem(name: "room", value: effectiveRoom),
+                 URLQueryItem(name: "lang", value: uiLanguage.rawValue)]
         if !accessKey.isEmpty { q.append(URLQueryItem(name: "key", value: accessKey)) }
         if !roomSecret.isEmpty { q.append(URLQueryItem(name: "rs", value: roomSecret)) }
         comp?.queryItems = q
-        guard let url = comp?.url else { status = "기록 URL 생성 실패"; return }
+        guard let url = comp?.url else { status = L10n.t("st.historyURLFail"); return }
         rtlog("openHistoryPage \(url.absoluteString)")
         NSWorkspace.shared.open(url)
     }
@@ -467,7 +485,7 @@ final class AppModel: ObservableObject {
         let provider = useClaude ? "bedrock" : "vllm"
         guard let url = controlURL("control/llm", [
             URLQueryItem(name: "provider", value: provider),
-        ]) else { llmControlStatus = "서버 주소 오류"; return }
+        ]) else { llmControlStatus = L10n.t("st.serverURLError"); return }
         var req = URLRequest(url: url, timeoutInterval: 10)
         if !accessKey.isEmpty { req.setValue(accessKey, forHTTPHeaderField: "X-Wake-Token") }
         rtlog("applyLLMSetting provider=\(provider)")
@@ -477,19 +495,19 @@ final class AppModel: ObservableObject {
                 let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
                 await MainActor.run {
                     if code == 401 || code == 403 {
-                        self?.llmControlStatus = "비밀번호 오류 — 설정 미적용"
+                        self?.llmControlStatus = L10n.t("st.pwErrorNotApplied")
                     } else if code == 200 {
                         self?.llmControlStatus = (self?.useClaude ?? false)
-                            ? "번역: Claude Sonnet 4.6 (정확도↑)"
-                            : "번역: Qwen 3-32B (로컬·무료)"
+                            ? L10n.t("st.transOnClaude")
+                            : L10n.t("st.transOnQwen")
                     } else if code == 502 || code == 504 {
-                        self?.llmControlStatus = "서버 꺼져 있음 — 깨운 뒤 자동 적용"
+                        self?.llmControlStatus = L10n.t("st.serverOffReapply")
                     } else {
-                        self?.llmControlStatus = "적용 실패 (\(code))"
+                        self?.llmControlStatus = L10n.t("st.applyFail", "\(code)")
                     }
                 }
             } catch {
-                await MainActor.run { self?.llmControlStatus = "서버 응답 없음 (꺼져 있을 수 있음)" }
+                await MainActor.run { self?.llmControlStatus = L10n.t("st.noResponseMaybeOff") }
             }
         }
     }
@@ -505,7 +523,7 @@ final class AppModel: ObservableObject {
             URLQueryItem(name: "silence_ms", value: String(silence)),
             URLQueryItem(name: "punct", value: punctEnabled ? "1" : "0"),
             URLQueryItem(name: "punct_ms", value: String(punctMs)),
-        ]) else { endpointControlStatus = "서버 주소 오류"; return }
+        ]) else { endpointControlStatus = L10n.t("st.serverURLError"); return }
         var req = URLRequest(url: url, timeoutInterval: 10)
         if !accessKey.isEmpty { req.setValue(accessKey, forHTTPHeaderField: "X-Wake-Token") }
         rtlog("applyEndpointSetting silence=\(silence) punct=\(punctEnabled) punctMs=\(punctMs)")
@@ -515,20 +533,20 @@ final class AppModel: ObservableObject {
                 let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
                 await MainActor.run {
                     if code == 401 || code == 403 {
-                        self?.endpointControlStatus = "비밀번호 오류 — 설정 미적용"
+                        self?.endpointControlStatus = L10n.t("st.pwErrorNotApplied")
                     } else if code == 200 {
                         let s = self?.minSilenceMs ?? 0
                         self?.endpointControlStatus = (self?.punctEnabled ?? false)
-                            ? "문장 끊기: 침묵 \(s)ms + 구두점 조기확정 ON"
-                            : "문장 끊기: 침묵 \(s)ms (구두점 조기확정 OFF)"
+                            ? L10n.t("st.endpointPunctOn", s)
+                            : L10n.t("st.endpointPunctOff", s)
                     } else if code == 502 || code == 504 {
-                        self?.endpointControlStatus = "서버 꺼져 있음 — 깨운 뒤 자동 적용"
+                        self?.endpointControlStatus = L10n.t("st.serverOffReapply")
                     } else {
-                        self?.endpointControlStatus = "적용 실패 (\(code))"
+                        self?.endpointControlStatus = L10n.t("st.applyFail", "\(code)")
                     }
                 }
             } catch {
-                await MainActor.run { self?.endpointControlStatus = "서버 응답 없음 (꺼져 있을 수 있음)" }
+                await MainActor.run { self?.endpointControlStatus = L10n.t("st.noResponseMaybeOff") }
             }
         }
     }
@@ -543,10 +561,10 @@ final class AppModel: ObservableObject {
     /// tap while transitioning is ignored.
     func wakeAndStart() {
         guard !running, !serverPhase.isTransitioning else { return }
-        guard let base = httpBase() else { serverPhase = .failed("서버 주소 오류"); return }
+        guard let base = httpBase() else { serverPhase = .failed(L10n.t("st.serverURLError")); return }
         wakeStartedAt = Date()
         serverPhase = .waking
-        wakeDetail = "서버 깨우는 중…"
+        wakeDetail = L10n.t("st.waking")
         rtlog("wakeAndStart base=\(base.absoluteString)")
         wakeTask?.cancel()
         wakeTask = Task { [weak self] in await self?.runWake(base: base) }
@@ -570,7 +588,7 @@ final class AppModel: ObservableObject {
             let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
             if code == 401 || code == 403 {
                 await MainActor.run {
-                    self.serverPhase = .failed("비밀번호가 틀렸어요")
+                    self.serverPhase = .failed(L10n.t("st.pwWrong"))
                     self.wakeDetail = ""
                 }
                 return
@@ -627,14 +645,14 @@ final class AppModel: ObservableObject {
         case .unreachable:
             serverPhase = .booting
             wakeDetail = remain > 0
-                ? "서버 부팅 중… 약 \(mins)분 남음"
-                : "서버 부팅 중…"
+                ? L10n.t("st.bootingMin", mins)
+                : L10n.t("st.booting")
         case .warming:
             // Relay is up; the long pole is the 32B model load.
             serverPhase = .warming
             wakeDetail = remain > 0
-                ? "모델 로딩 중… 약 \(mins)분 남음"
-                : "모델 로딩 중… 거의 다 됐어요"
+                ? L10n.t("st.modelLoadingMin", mins)
+                : L10n.t("st.modelAlmost")
         case .ready:
             break   // handled in onServerReady
         }
@@ -643,7 +661,7 @@ final class AppModel: ObservableObject {
     /// /healthz said ready — notify the user and auto-start capture.
     private func onServerReady() {
         serverPhase = .ready
-        wakeDetail = "준비 완료 — 시작합니다"
+        wakeDetail = L10n.t("st.ready")
         wakeTask = nil
         notifyReady()
         // The box just (re)booted, so its translation-model choice and
@@ -690,6 +708,9 @@ final class AppModel: ObservableObject {
         autoSaver = saver
         autosavePath = saver.fileURL.path
 
+        // UI language drives the end-of-session summary language (sent in config).
+        micClient.uiLang = uiLanguage.rawValue
+        sysClient.uiLang = uiLanguage.rawValue
         // mic = my side (my language first); system = the remote side (their
         // language first). Flipping the pair makes each stream translate toward
         // the other language even when whisper detects the expected source.
@@ -907,7 +928,7 @@ final class AppModel: ObservableObject {
     /// key points + next actions. No-op (and no cost) unless the user invoked it.
     func requestInsight(mode: String) {
         guard !lines.isEmpty else {
-            if mode == "final" { insightStatus = "정리할 대화 내용이 없어요" }
+            if mode == "final" { insightStatus = L10n.t("st.insightNoConvo") }
             return
         }
         // One in-flight at a time: drop a live refresh if one is running (a newer
@@ -917,23 +938,24 @@ final class AppModel: ObservableObject {
         let payload: [String: Any] = [
             "mode": mode,
             "context": insightContext,
+            "lang": uiLanguage.rawValue,
             "transcript": transcriptLines(limit: limit),
         ]
         guard let base = httpBase(),
               let body = try? JSONSerialization.data(withJSONObject: payload) else {
-            insightStatus = "요청 생성 실패"; return
+            insightStatus = L10n.t("st.requestFail"); return
         }
         var comp = URLComponents(url: base.appendingPathComponent("insight"),
                                  resolvingAgainstBaseURL: false)
         if !accessKey.isEmpty { comp?.queryItems = [URLQueryItem(name: "token", value: accessKey)] }
-        guard let url = comp?.url else { insightStatus = "URL 생성 실패"; return }
+        guard let url = comp?.url else { insightStatus = L10n.t("st.urlFail"); return }
         var req = URLRequest(url: url, timeoutInterval: 30)
         req.httpMethod = "POST"
         req.httpBody = body
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         if !accessKey.isEmpty { req.setValue(accessKey, forHTTPHeaderField: "X-Wake-Token") }
         insightBusy = true
-        insightStatus = mode == "final" ? "마무리 정리 중…" : "인사이트 갱신 중…"
+        insightStatus = mode == "final" ? L10n.t("st.insightWrapping") : L10n.t("st.insightUpdating")
         rtlog("requestInsight mode=\(mode) lines=\(transcriptLines(limit: limit).count)")
         Task { [weak self] in
             defer { Task { @MainActor in self?.insightBusy = false } }
@@ -943,27 +965,27 @@ final class AppModel: ObservableObject {
                 let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
                 await MainActor.run {
                     guard code == 200, let obj else {
-                        if code == 401 || code == 403 { self?.insightStatus = "비밀번호 오류" }
-                        else if code == 502 || code == 504 { self?.insightStatus = "서버 꺼져 있음" }
-                        else { self?.insightStatus = "인사이트 실패 (\(code))" }
+                        if code == 401 || code == 403 { self?.insightStatus = L10n.t("st.pwError") }
+                        else if code == 502 || code == 504 { self?.insightStatus = L10n.t("st.serverOff") }
+                        else { self?.insightStatus = L10n.t("st.insightFail", "\(code)") }
                         return
                     }
                     if let err = obj["error"] as? String {
-                        self?.insightStatus = "오류: \(err)"; return
+                        self?.insightStatus = L10n.t("st.error", err); return
                     }
                     if mode == "final" {
                         self?.finalSummary = obj["summary"] as? String ?? ""
                         self?.keyPoints = (obj["key_points"] as? [Any])?.compactMap { $0 as? String } ?? []
                         self?.nextActions = (obj["next_actions"] as? [Any])?.compactMap { $0 as? String } ?? []
-                        self?.insightStatus = "정리 완료"
+                        self?.insightStatus = L10n.t("st.insightDone")
                     } else {
                         self?.liveSummary = obj["summary"] as? String ?? ""
                         self?.suggestedQuestions = (obj["questions"] as? [Any])?.compactMap { $0 as? String } ?? []
-                        self?.insightStatus = "업데이트됨"
+                        self?.insightStatus = L10n.t("st.insightUpdated")
                     }
                 }
             } catch {
-                await MainActor.run { self?.insightStatus = "서버 응답 없음" }
+                await MainActor.run { self?.insightStatus = L10n.t("st.noResponse") }
             }
         }
     }

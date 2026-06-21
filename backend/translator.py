@@ -196,23 +196,31 @@ class Translator:
 # load-bearing like subtitles).
 # ---------------------------------------------------------------------------
 
-_INSIGHT_SYSTEM = (
-    "You are a real-time meeting copilot. You read a running, possibly bilingual "
-    "(Korean/Japanese/English) transcript of a live conversation and help the "
-    "user — whose ROLE AND GOALS are given below — stay on top of it.\n"
-    "The user's context defines who they are and what they care about; let it "
-    "steer everything. If they say they are an interviewer focused on system "
-    "design, your suggested questions must probe system-design depth — not "
-    "generic small talk.\n"
-    "ALWAYS write your output in KOREAN (한국어), no matter what language the "
-    "transcript or the context is in. Every string value you emit (summary, "
-    "questions, key points, next actions) must be Korean.\n"
-    "Be concise and concrete; never invent facts not in the transcript. Output "
-    "ONLY a single JSON object, no markdown, no prose around it."
-)
+# Output language for insight/summary — chosen by the app (matches the UI
+# language the user reads in). Falls back to Korean.
+_LANG_NAME = {"ko": "KOREAN (한국어)", "ja": "JAPANESE (日本語)", "en": "ENGLISH"}
 
 
-def _insight_user_prompt(context: str, transcript_lines: list[str], mode: str) -> str:
+def _insight_system(lang: str) -> str:
+    lname = _LANG_NAME.get(lang, _LANG_NAME["ko"])
+    return (
+        "You are a real-time meeting copilot. You read a running, possibly bilingual "
+        "(Korean/Japanese/English) transcript of a live conversation and help the "
+        "user — whose ROLE AND GOALS are given below — stay on top of it.\n"
+        "The user's context defines who they are and what they care about; let it "
+        "steer everything. If they say they are an interviewer focused on system "
+        "design, your suggested questions must probe system-design depth — not "
+        "generic small talk.\n"
+        f"ALWAYS write your output in {lname}, no matter what language the "
+        "transcript or the context is in. Every string value you emit (summary, "
+        "questions, key points, next actions) must be in that language.\n"
+        "Be concise and concrete; never invent facts not in the transcript. Output "
+        "ONLY a single JSON object, no markdown, no prose around it."
+    )
+
+
+def _insight_user_prompt(context: str, transcript_lines: list[str], mode: str,
+                         lang: str = "ko") -> str:
     ctx = context.strip() or "(no specific context given — act as a neutral, helpful meeting assistant)"
     convo = "\n".join(transcript_lines).strip() or "(transcript empty so far)"
     if mode == "final":
@@ -237,16 +245,20 @@ def _insight_user_prompt(context: str, transcript_lines: list[str], mode: str) -
         f"=== USER CONTEXT (their role & goals) ===\n{ctx}\n\n"
         f"=== TRANSCRIPT (oldest first; 'ME' = the user, 'THEM' = the other side) ===\n"
         f"{convo}\n\n=== TASK ===\n{shape}\n\n"
-        "IMPORTANT: Write every value in KOREAN (한국어)."
+        f"IMPORTANT: Write every value in {_LANG_NAME.get(lang, _LANG_NAME['ko'])}."
     )
 
 
-async def generate_insight(context: str, transcript_lines: list[str], mode: str) -> dict:
+async def generate_insight(context: str, transcript_lines: list[str], mode: str,
+                           lang: str = "ko") -> dict:
     """One-shot Bedrock Claude call producing the insight JSON for `mode`
-    ("live" | "final"). Returns the parsed dict, or {"error": "..."} on failure
-    (the app shows the error; insight is opt-in so we don't fall back to Qwen)."""
+    ("live" | "final"), with output in `lang` (ko|ja|en). Returns the parsed
+    dict, or {"error": "..."} on failure (the app shows the error; insight is
+    opt-in so we don't fall back to Qwen)."""
     from anthropic import AsyncAnthropicBedrock
 
+    if lang not in _LANG_NAME:
+        lang = "ko"
     max_tokens = (settings.INSIGHT_FINAL_MAX_TOKENS if mode == "final"
                   else settings.INSIGHT_LIVE_MAX_TOKENS)
     client = AsyncAnthropicBedrock(aws_region=settings.BEDROCK_REGION)
@@ -254,9 +266,9 @@ async def generate_insight(context: str, transcript_lines: list[str], mode: str)
         resp = await client.messages.create(
             model=settings.BEDROCK_MODEL,
             max_tokens=max_tokens,
-            system=[{"type": "text", "text": _INSIGHT_SYSTEM}],
+            system=[{"type": "text", "text": _insight_system(lang)}],
             messages=[{"role": "user",
-                       "content": _insight_user_prompt(context, transcript_lines, mode)}],
+                       "content": _insight_user_prompt(context, transcript_lines, mode, lang)}],
             timeout=settings.LLM_TIMEOUT,
         )
         text = "".join(b.text for b in resp.content
