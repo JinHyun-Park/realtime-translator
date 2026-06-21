@@ -67,6 +67,61 @@ async def log_session(record: dict, day: str, epoch_ms: int):
         pass   # logging must never break the session
 
 
+async def archive_session(meta: dict, day: str, epoch_ms: int,
+                          lines: list[dict], truncated: bool):
+    """On session end: build the full bilingual transcript + an auto summary &
+    next-actions (via the insight model) and store it at
+    sessions/<day>/<epoch_ms>-<room>.transcript.json. Best-effort; never raises.
+    `meta` is the same metadata record written to the lightweight session log."""
+    if not settings.SESSION_BUCKET:
+        return
+    room = (meta.get("room") or "default").replace("/", "_")
+    key = f"sessions/{day}/{epoch_ms}-{room}.transcript.json"
+
+    # Auto summary + next actions from the transcript (final-wrap insight).
+    summary = {}
+    try:
+        from translator import generate_insight
+        convo = [f"{('ME' if x.get('stream')=='mic' else 'THEM')}: "
+                 f"{x.get('translation') or x.get('source','')}" for x in lines]
+        if convo:
+            summary = await generate_insight("", convo, "final")
+    except Exception as e:
+        log.warning("archive summary failed: %s", e.__class__.__name__)
+        summary = {"error": "summary generation failed"}
+
+    record = {**meta, "truncated": truncated, "lines": len(lines),
+              "transcript": lines, "summary": summary}
+    try:
+        await asyncio.to_thread(
+            _put_sync, key, json.dumps(record, ensure_ascii=False).encode())
+        log.info("archived session transcript: %s (%d lines)", key, len(lines))
+    except Exception:
+        pass
+
+
+def _get_sync(key: str) -> dict | None:
+    c = _client()
+    if not c:
+        return None
+    try:
+        o = c.get_object(Bucket=settings.SESSION_BUCKET, Key=key)
+        return json.loads(o["Body"].read())
+    except Exception:
+        return None
+
+
+async def get_archive(key: str) -> dict | None:
+    """Fetch one archived session transcript by its S3 key (admin detail view).
+    Only keys under sessions/ are honored (caller-supplied key is constrained)."""
+    if not settings.SESSION_BUCKET or not key.startswith("sessions/"):
+        return None
+    try:
+        return await asyncio.to_thread(_get_sync, key)
+    except Exception:
+        return None
+
+
 def _list_sync(days: list[str], limit: int) -> list[dict]:
     c = _client()
     if not c:
@@ -79,9 +134,17 @@ def _list_sync(days: list[str], limit: int) -> list[dict]:
         except Exception:
             continue
         for obj in resp.get("Contents", []):
+            key = obj["Key"]
+            # History lists one entry per session = the lightweight meta object.
+            # Skip the heavy *.transcript.json (fetched on demand for detail).
+            if key.endswith(".transcript.json"):
+                continue
             try:
-                o = c.get_object(Bucket=settings.SESSION_BUCKET, Key=obj["Key"])
-                out.append(json.loads(o["Body"].read()))
+                o = c.get_object(Bucket=settings.SESSION_BUCKET, Key=key)
+                rec = json.loads(o["Body"].read())
+                # Point at this session's transcript archive (same id, by convention)
+                rec["transcript_key"] = key[:-len(".json")] + ".transcript.json"
+                out.append(rec)
             except Exception:
                 continue
     # newest first by end time (fall back to start)

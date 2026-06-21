@@ -292,6 +292,12 @@ async def _handle(ws):
     cap_info = {"stream": None, "pair": list(pair), "finals": 0,
                 "started_ts": _started, "last_ts": _started}
     CAPTURES_BY_ROOM.setdefault(room, []).append(cap_info)
+    # Accumulate this session's finalized lines in memory (capped) for the
+    # end-of-session archive (full transcript + summary -> S3). Source + target
+    # so the saved record is a complete bilingual transcript. The cap protects
+    # memory on a very long meeting; we log if it's hit.
+    transcript: list[dict] = []
+    TRANSCRIPT_CAP = settings.ARCHIVE_MAX_LINES
     # Drop stale interim work if a newer one for the same seq arrives.
     interim_tasks: dict[int, asyncio.Task] = {}
 
@@ -322,6 +328,15 @@ async def _handle(ws):
                     METRICS["finals_total"] += 1
                     cap_info["finals"] += 1            # operator metric counter
                     cap_info["last_ts"] = _time.time()  # room activity timestamp
+                    # Accumulate the bilingual line for the end-of-session archive.
+                    if len(transcript) < TRANSCRIPT_CAP:
+                        transcript.append({
+                            "ts": int(_time.time() * 1000),
+                            "stream": stream, "src": res.language, "tgt": tgt,
+                            "source": res.text, "translation": translation,
+                        })
+                    elif len(transcript) == TRANSCRIPT_CAP:
+                        transcript.append({"truncated": True})  # marker; logged below
                     # end-to-end latency: process start -> ready to send
                     dt = (_time.time() - t0) * 1000.0
                     _e2e_samples.append(dt)
@@ -435,6 +450,18 @@ async def _handle(ws):
                 asyncio.create_task(log_session(record, day, record["ended_ms"]))
             except Exception:
                 pass
+            # Archive the FULL bilingual transcript + an auto summary/next-actions.
+            # Off-loaded so it never delays the disconnect path. Strips the
+            # truncation marker (if any) and notes it on the record.
+            if settings.ARCHIVE_TRANSCRIPT and transcript:
+                truncated = bool(transcript and transcript[-1].get("truncated"))
+                lines = [t for t in transcript if not t.get("truncated")]
+                try:
+                    from session_log import archive_session
+                    asyncio.create_task(archive_session(
+                        record, day, record["ended_ms"], lines, truncated))
+                except Exception:
+                    pass
 
 
 def _metrics_snapshot() -> dict:

@@ -47,6 +47,11 @@ class Settings:
     # by default (under a sessions/ prefix; the box role has scoped write there).
     SESSION_BUCKET = _s("RT_SESSION_BUCKET", "")
     SESSION_REGION = _s("RT_SESSION_REGION", _s("RT_BEDROCK_REGION", "ap-northeast-1"))
+    # On session end, archive the FULL bilingual transcript + an auto summary +
+    # next-actions to S3 (sessions/<day>/<id>-<room>.transcript.json). Memory cap
+    # on the in-flight transcript (very long meetings get truncated with a marker).
+    ARCHIVE_TRANSCRIPT = _s("RT_ARCHIVE_TRANSCRIPT", "1") == "1"
+    ARCHIVE_MAX_LINES = _i("RT_ARCHIVE_MAX_LINES", 5000)
 
     # --- Audio (must match what the Mac app sends) ---
     SAMPLE_RATE = _i("RT_SAMPLE_RATE", 16000)   # Hz, mono PCM16 LE
