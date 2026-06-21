@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>지난 회의 기록</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin:0; font:15px -apple-system,system-ui,sans-serif; background:#0d1117; color:#e6edf3; }
+  header { padding:14px 18px; border-bottom:1px solid #21262d; }
+  h1 { font-size:17px; margin:0; }
+  .sub { color:#8b949e; font-size:13px; margin-top:4px; }
+  .wrap { padding:14px 18px; max-width:840px; }
+  .card { border:1px solid #21262d; border-radius:8px; padding:12px 14px; margin-bottom:10px; cursor:pointer; }
+  .card:hover { border-color:#388bfd; }
+  .card .when { color:#8b949e; font-size:13px; }
+  .card .meta { font-size:13px; margin-top:3px; }
+  .empty,.err { color:#8b949e; padding:24px 4px; }
+  .err { color:#f85149; }
+  h3 { font-size:13px; color:#8b949e; margin:14px 0 6px; }
+  .line { margin:6px 0; }
+  .who { font-family:ui-monospace,monospace; font-size:11px; }
+  .src { color:#8b949e; }
+  .tr { margin-left:30px; }
+  #detail { display:none; position:fixed; inset:0; background:rgba(0,0,0,.6); overflow:auto; }
+  #panel { max-width:840px; margin:36px auto; background:#0d1117; border:1px solid #30363d; border-radius:10px; padding:18px; }
+  button { background:#30363d; border:0; color:#fff; padding:7px 13px; border-radius:6px; font-size:14px; cursor:pointer; }
+  .gate { padding:26px 18px; }
+  input { background:#0d1117; border:1px solid #30363d; color:#e6edf3; padding:8px 10px; border-radius:6px; font-size:14px; width:260px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🗂️ 지난 회의 기록</h1>
+  <div class="sub" id="sub"></div>
+</header>
+
+<div class="gate" id="gate" style="display:none">
+  <p>이 방의 기록을 보려면 비밀번호가 필요합니다.</p>
+  <p><input id="key" type="password" placeholder="접속 비밀번호"></p>
+  <p><input id="rs" type="password" placeholder="방 비번 (있으면)"></p>
+  <button onclick="saveCreds()">열기</button>
+  <div class="err" id="gateErr"></div>
+</div>
+
+<div class="wrap" id="main" style="display:none">
+  <div id="list"></div>
+  <div class="empty" id="empty" style="display:none">아직 저장된 회의 기록이 없습니다.</div>
+</div>
+
+<div id="detail"><div id="panel">
+  <div style="display:flex;gap:10px;align-items:center">
+    <h2 style="font-size:15px;margin:0" id="dTitle">회의 상세</h2>
+    <button style="margin-left:auto" onclick="document.getElementById('detail').style.display='none'">닫기</button>
+  </div>
+  <div id="dBody" style="margin-top:12px;user-select:text"></div>
+</div></div>
+
+<script>
+  var P = new URLSearchParams(location.search);
+  var room = P.get("room") || "default";
+  // creds: URL first, else saved per-room, else prompt
+  function cred(name){
+    var u = P.get(name);
+    if(u){ try{localStorage.setItem("rt:"+name+":"+room,u);}catch(e){} return u; }
+    try{ return localStorage.getItem("rt:"+name+":"+room)||""; }catch(e){ return ""; }
+  }
+  var key = cred("key"), rs = cred("rs");
+  document.getElementById("sub").textContent = "방: " + room;
+
+  function esc(s){ return (s==null?"":String(s)).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
+  function fmt(ms){ if(!ms) return "—"; return new Date(ms).toLocaleString([],{month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit"}); }
+  function dur(s){ if(s==null) return ""; if(s<60) return s+"초"; return Math.floor(s/60)+"분"; }
+
+  function saveCreds(){
+    key=document.getElementById("key").value.trim();
+    rs=document.getElementById("rs").value.trim();
+    try{ localStorage.setItem("rt:key:"+room,key); localStorage.setItem("rt:rs:"+room,rs); }catch(e){}
+    load();
+  }
+  function q(extra){ return "room="+encodeURIComponent(room)+"&key="+encodeURIComponent(key)+"&rs="+encodeURIComponent(rs)+(extra||""); }
+
+  async function load(){
+    if(!key){ document.getElementById("gate").style.display="block"; document.getElementById("main").style.display="none"; return; }
+    try {
+      var r = await fetch("/history/list?"+q(), {cache:"no-store"});
+      if(r.status===401){ showGate("접속 비밀번호가 올바르지 않습니다."); return; }
+      if(r.status===403){ showGate("방 비번이 올바르지 않습니다."); return; }
+      var d = await r.json();
+      document.getElementById("gate").style.display="none";
+      document.getElementById("main").style.display="block";
+      var s = d.sessions||[];
+      document.getElementById("list").innerHTML = s.map(function(x){
+        return "<div class='card' onclick=\"openOne('"+encodeURIComponent(x.transcript_key||"")+"')\">"
+          + "<div class='when'>"+fmt(x.started_ms)+" ~ "+fmt(x.ended_ms)+"</div>"
+          + "<div class='meta'>"+(x.finals||0)+"문장 · "+dur(x.duration_s)+" · "+((x.pair||[]).join("-"))+"</div></div>";
+      }).join("");
+      var emp=document.getElementById("empty");
+      emp.style.display = s.length? "none":"block";
+      if(!d.enabled) emp.textContent="기록 저장이 비활성화되어 있습니다.";
+    } catch(e){ showGate("연결 오류"); }
+  }
+  function showGate(msg){
+    document.getElementById("gate").style.display="block";
+    document.getElementById("main").style.display="none";
+    document.getElementById("gateErr").textContent=msg||"";
+  }
+  async function openOne(encId){
+    if(!encId){ return; }
+    var dl=document.getElementById("detail"), b=document.getElementById("dBody");
+    b.innerHTML="<p class='src'>불러오는 중…</p>"; dl.style.display="block";
+    try {
+      var r=await fetch("/history/get?"+q("&id="+encId),{cache:"no-store"});
+      if(r.status!==200){ b.innerHTML="<p class='err'>불러오기 실패 ("+r.status+")</p>"; return; }
+      var d=await r.json(), sm=d.summary||{}, h="";
+      document.getElementById("dTitle").textContent="회의 상세 · "+(d.lines||0)+"문장"+(d.truncated?" (일부 잘림)":"");
+      if(sm.summary){ h+="<h3>핵심 요약</h3><p>"+esc(sm.summary)+"</p>"; }
+      if((sm.key_points||[]).length){ h+="<h3>핵심 포인트</h3><ul>"+sm.key_points.map(function(p){return "<li>"+esc(p)+"</li>";}).join("")+"</ul>"; }
+      if((sm.next_actions||[]).length){ h+="<h3>다음 액션</h3><ul>"+sm.next_actions.map(function(p){return "<li>"+esc(p)+"</li>";}).join("")+"</ul>"; }
+      h+="<h3>전사 (원문 → 번역)</h3>";
+      h+=(d.transcript||[]).map(function(t){
+        var who=(t.stream==="mic")?"ME":"THEM", c=(t.stream==="mic")?"#79c0ff":"#3fb950";
+        return "<div class='line'><span class='who' style='color:"+c+"'>"+who+"</span> "
+          +"<span class='src'>"+esc(t.source)+"</span><br><span class='tr'>"+esc(t.translation)+"</span></div>";
+      }).join("");
+      b.innerHTML=h;
+    } catch(e){ b.innerHTML="<p class='err'>오류</p>"; }
+  }
+  load();
+</script>
+</body>
+</html>

@@ -72,6 +72,15 @@ struct ControlPanel: View {
                         .controlSize(.regular)
                         Text("팀원과 함께 볼 땐 이 페이지 주소를 공유하세요 (비번 입력하면 시청).")
                             .font(.caption2).foregroundStyle(.secondary)
+                        Button {
+                            model.openHistoryPage()
+                        } label: {
+                            Label("지난 회의 기록 보기 (전사·요약)", systemImage: "clock.arrow.circlepath")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .controlSize(.regular)
+                        Text("이 방의 끝난 회의들의 전체 전사와 요약·다음 액션을 브라우저에서 봅니다.")
+                            .font(.caption2).foregroundStyle(.secondary)
                     }.padding(6)
                 }
 

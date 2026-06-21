@@ -161,3 +161,16 @@ async def recent_sessions(days: list[str], limit: int = 200) -> list[dict]:
         return await asyncio.to_thread(_list_sync, days, limit)
     except Exception:
         return []
+
+
+async def sessions_for_room(room: str, days: list[str], limit: int = 100) -> list[dict]:
+    """Sessions belonging to ONE room (for the per-room user history page).
+    Same data as recent_sessions but filtered to `room` — a user only ever sees
+    their own room's sessions."""
+    if not settings.SESSION_BUCKET or not room:
+        return []
+    try:
+        allrecs = await asyncio.to_thread(_list_sync, days, 1000)
+    except Exception:
+        return []
+    return [r for r in allrecs if r.get("room") == room][:limit]

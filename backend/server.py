@@ -497,6 +497,18 @@ def _load_viewer_html() -> bytes:
 
 _VIEWER_HTML = _load_viewer_html()
 
+
+def _load_history_html() -> bytes:
+    import pathlib
+    p = pathlib.Path(__file__).parent / "history.html"
+    try:
+        return p.read_bytes()
+    except Exception:
+        return b"<!doctype html><h1>history.html missing</h1>"
+
+
+_HISTORY_HTML = _load_history_html()
+
 # Optional, out-of-tree operator console. admin_ext.py is NOT in git and NOT
 # shipped — it exists only on the operator's own box. When absent, _ADMIN is None
 # and the relay exposes NO /admin surface at all (the public code has zero admin
@@ -597,6 +609,46 @@ async def _serve_http(port: int = 9000):
                 ctype = b"application/json"
             elif path in (b"/view", b"/view/", b"/viewer.html", b"/"):
                 body, ctype = _VIEWER_HTML, b"text/html; charset=utf-8"
+            elif path in (b"/history", b"/history/", b"/history/list", b"/history/get"):
+                # Per-room session history for the ROOM'S USERS (not admin). A user
+                # sees ONLY their own room's archived sessions (transcript + auto
+                # summary). Auth = the shared relay token (?key=) AND, if the room
+                # is locked, its room secret (?rs=) — same gate as joining the room.
+                if path in (b"/history", b"/history/"):
+                    body, ctype = _HISTORY_HTML, b"text/html; charset=utf-8"
+                else:
+                    room = (qs.get("room") or [DEFAULT_ROOM])[0].strip() or DEFAULT_ROOM
+                    key = (qs.get("key") or qs.get("token") or [""])[0]
+                    rs = (qs.get("rs") or [""])[0]
+                    # token gate (box entry)
+                    if not (settings.auth_open or
+                            (settings.RELAY_TOKEN and key and
+                             __import__("secrets").compare_digest(key, settings.RELAY_TOKEN))):
+                        _reply(writer, b'{"error":"unauthorized"}', b"application/json",
+                               b"401 Unauthorized"); await writer.drain(); return
+                    # room-secret gate (room entry) — must match to read its archive
+                    from room_auth import check_access
+                    if not await check_access(room, rs):
+                        _reply(writer, b'{"error":"room locked"}', b"application/json",
+                               b"403 Forbidden"); await writer.drain(); return
+                    import datetime as _dt
+                    today = _dt.datetime.utcfromtimestamp(_time.time())
+                    days = [(today - _dt.timedelta(days=i)).strftime("%Y-%m-%d") for i in range(14)]
+                    if path == b"/history/list":
+                        from session_log import sessions_for_room
+                        sess = await sessions_for_room(room, days, limit=100)
+                        body = json.dumps({"room": room, "sessions": sess,
+                                           "enabled": bool(settings.SESSION_BUCKET)}).encode()
+                    else:  # /history/get?id=<transcript_key>
+                        from session_log import get_archive
+                        akey = (qs.get("id") or [""])[0]
+                        rec = await get_archive(akey)
+                        # enforce the requested archive really belongs to this room
+                        if rec is None or rec.get("room") != room:
+                            _reply(writer, b'{"error":"not found"}', b"application/json",
+                                   b"404 Not Found"); await writer.drain(); return
+                        body = json.dumps(rec, ensure_ascii=False).encode()
+                    ctype = b"application/json"
             elif path == b"/healthz":
                 # Tiny readiness probe for the app's wake flow. Deliberately
                 # leaks ONLY booleans (NOT full metrics): box stopped => the app

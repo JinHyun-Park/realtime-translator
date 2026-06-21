@@ -398,6 +398,22 @@ final class AppModel: ObservableObject {
         NSWorkspace.shared.open(url)
     }
 
+    /// Open THIS ROOM's past-session history (transcripts + auto summaries) in the
+    /// browser. Carries room + password (+ room secret if set) so it opens without
+    /// prompting. Shows only this room's sessions (server enforces room match).
+    func openHistoryPage() {
+        guard let base = httpBase() else { status = "서버 주소 오류"; return }
+        var comp = URLComponents(url: base.appendingPathComponent("history"),
+                                 resolvingAgainstBaseURL: false)
+        var q = [URLQueryItem(name: "room", value: effectiveRoom)]
+        if !accessKey.isEmpty { q.append(URLQueryItem(name: "key", value: accessKey)) }
+        if !roomSecret.isEmpty { q.append(URLQueryItem(name: "rs", value: roomSecret)) }
+        comp?.queryItems = q
+        guard let url = comp?.url else { status = "기록 URL 생성 실패"; return }
+        rtlog("openHistoryPage \(url.absoluteString)")
+        NSWorkspace.shared.open(url)
+    }
+
     // MARK: - Auto-stop control (cost guard)
 
     /// Build a /control/<action> URL with the token + query params. Token rides
