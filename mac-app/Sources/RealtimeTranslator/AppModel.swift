@@ -358,14 +358,25 @@ final class AppModel: ObservableObject {
     }
 
     func refreshDevices() {
-        inputDevices = AudioDevices.inputs()
-        outputDevices = AudioDevices.outputs()
-        // If the currently-selected device went away, fall back to system default.
-        if let sel = selectedInputID, !inputDevices.contains(where: { $0.id == sel }) {
-            selectedInputID = nil
-        }
-        if let sel = selectedOutputID, !outputDevices.contains(where: { $0.id == sel }) {
-            selectedOutputID = nil
+        // Enumerate devices OFF the main thread: AudioDevices.* calls into the
+        // CoreAudio HAL (AudioObjectGetPropertyData), which BLOCKS if coreaudiod
+        // is busy/wedged — and on the main thread that freezes the whole UI. We
+        // compute on a background queue and hop back only to assign @Published.
+        DispatchQueue.global(qos: .userInitiated).async {
+            let ins = AudioDevices.inputs()
+            let outs = AudioDevices.outputs()
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.inputDevices = ins
+                self.outputDevices = outs
+                // If a selected device went away, fall back to system default.
+                if let sel = self.selectedInputID, !ins.contains(where: { $0.id == sel }) {
+                    self.selectedInputID = nil
+                }
+                if let sel = self.selectedOutputID, !outs.contains(where: { $0.id == sel }) {
+                    self.selectedOutputID = nil
+                }
+            }
         }
     }
 
@@ -714,20 +725,24 @@ final class AppModel: ObservableObject {
     private var dbgTimer: Timer?
 
     private func requestMicThenStart() {
+        // IMPORTANT: do all AVAudioEngine work OFF the main thread. Touching
+        // engine.inputNode / engine.start() can dispatch_sync to an internal HAL
+        // queue and BLOCK; on the main thread that freezes the whole UI ("앱이
+        // 응답하지 않음"). We run it on a background queue and only hop back to
+        // the main actor to update status. The onSamples closure just forwards
+        // audio (thread-safe counters/WS send), so it's fine off-main.
+        let selected = selectedInputID
         let begin: () -> Void = { [weak self] in
             guard let self else { return }
-            do {
-                try self.mic.setInputDevice(self.selectedInputID)
-                self.mic.onSamples = { [weak self] s in
-                    guard let self else { return }
-                    self.micFlow.add(s.count)
-                    self.micClient.sendAudio(floatsToPCM16(s))
-                }
-                try self.mic.start()
-                rtlog("mic.start() OK device=\(String(describing: self.selectedInputID))")
-            } catch {
-                self.status = "Mic error: \(error.localizedDescription)"
-                rtlog("mic.start() FAILED: \(error.localizedDescription)")
+            self.mic.onSamples = { [weak self] s in
+                guard let self else { return }
+                self.micFlow.add(s.count)
+                self.micClient.sendAudio(floatsToPCM16(s))
+            }
+            // MicCapture.startAsync runs the blocking AVAudioEngine work on its
+            // OWN private queue (never the main thread) and calls back on error.
+            self.mic.startAsync(device: selected) { msg in
+                if let msg { Task { @MainActor in self.status = "Mic error: \(msg)" } }
             }
         }
         switch AVCaptureDevice.authorizationStatus(for: .audio) {
@@ -774,7 +789,10 @@ final class AppModel: ObservableObject {
     func stop() {
         wakeTask?.cancel(); wakeTask = nil
         dbgTimer?.invalidate(); dbgTimer = nil
-        mic.stop()
+        // Stop audio off the main thread too — engine teardown touches the same
+        // HAL queue that can block. MicCapture.stopAsync uses its own queue;
+        // system capture stop is already async-safe.
+        mic.stopAsync()
         if #available(macOS 13.0, *), let cap = sysCapture as? SystemAudioCapture {
             cap.stop()
         }

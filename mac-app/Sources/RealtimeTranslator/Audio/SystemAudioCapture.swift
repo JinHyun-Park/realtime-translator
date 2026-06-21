@@ -46,8 +46,16 @@ final class SystemAudioCapture: NSObject, SCStreamOutput {
     }
 
     func stop() {
-        stream?.stopCapture { _ in }
+        // Stop the capture AND remove the output so ScreenCaptureKit / coreaudiod
+        // fully tear the stream down. Just dropping the reference (or skipping
+        // removeStreamOutput) can leave a half-open stream that coreaudiod keeps
+        // servicing — repeated start/stop then leaks and can spin the daemon.
+        guard let s = stream else { return }
         stream = nil
+        try? s.removeStreamOutput(self, type: .audio)
+        s.stopCapture { err in
+            if let err { rtlog("sys stopCapture err: \(err.localizedDescription)") }
+        }
     }
 
     private var loggedFirst = false

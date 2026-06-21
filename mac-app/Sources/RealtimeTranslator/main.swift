@@ -25,6 +25,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         true
     }
+
+    /// On quit, tear capture down cleanly (stop AVAudioEngine + SCStream, close
+    /// the WebSockets). Without this, quitting mid-capture leaves ScreenCaptureKit
+    /// streams half-open, which coreaudiod keeps servicing — repeated over a
+    /// session that can leak/spin the audio daemon. Give the async stop a brief
+    /// moment to run before the process exits.
+    func applicationWillTerminate(_ notification: Notification) {
+        if model.running { model.stop() }
+    }
 }
 
 // Top-level code runs on the main thread; assert main-actor isolation so we can
