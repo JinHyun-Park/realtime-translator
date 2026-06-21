@@ -6,7 +6,10 @@ models on a GPU box you own. Built for meetings/calls (Zoom, etc.): one person
 captures, and the whole team can watch the subtitles in a browser (**broadcast mode**).
 
 Default pair is **Korean ↔ Japanese** (it auto-detects which side spoke); **English**
-is also supported, and any pair works as long as the models do.
+is also supported, and any pair works as long as the models do. The app's own
+interface (labels, insight, history) also speaks **Korean / Japanese / English**.
+
+![Realtime Translator — live translation with the insight panel and language picker](docs/screenshot.png)
 
 ```
  ┌─ Mac app (Swift/SwiftUI) ─────────────┐        ┌─ Relay (Python, asyncio) ─┐      ┌─ Open models (GPU) ─────────┐
@@ -58,6 +61,7 @@ is also supported, and any pair works as long as the models do.
 | **Broadcast** | One capturer → relay translates **once** → **N browser viewers** watch subtitles at `/view` (no app, no permissions, just a URL + password). |
 | **Auth** | Single shared password (token). Required on every connection — capture app and viewers alike. |
 | **Auto-save** | Every finalized line is written to `~/Documents/RealtimeTranslator/transcript-*.md` the instant it arrives — quit/crash never loses the transcript. |
+| **Multilingual UI** | App interface in **Korean / Japanese / English** (picker, top-right). Every label, button, hint and status message is localized; first launch guesses from the macOS system language, then your pick is remembered. The **live insight + end-of-session summary** are generated in the chosen language, and the room **history page** (`/history`) is trilingual too. |
 | **Cost guard** | GPU box **self-stops after 15 min idle** (never mid-meeting), **wakes on demand** from the app, and reports readiness so the app auto-starts when the model is loaded. |
 
 ---
