@@ -205,6 +205,12 @@ struct ControlPanel: View {
 
                 // Start / Wake & Start / Stop
                 StartControl()
+
+                // Build version — lets a recipient tell if their app is current.
+                Text("RealtimeTranslator \(AppConfig.versionLabel)")
+                    .font(.caption2).foregroundStyle(.tertiary)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .textSelection(.enabled)
             }
             .padding()
         }

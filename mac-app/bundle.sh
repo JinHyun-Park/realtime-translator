@@ -15,30 +15,43 @@ CONFIG_SWIFT="Sources/RealtimeTranslator/AppModel.swift"
 # AppModel.swift). Used for a build shared with one trusted person who should
 # use an existing box. NEVER bakes the token. Empty (default) => no URL baked
 # in, which is correct for a public distributable. We restore the file after.
+# Version + build date are ALWAYS stamped into AppConfig (from the VERSION file
+# and today's date). RT_DEFAULT_SERVER_URL is baked in only when set. All are
+# marker-line rewrites; we restore the source file afterwards (trap).
+RT_VERSION="$(cat VERSION 2>/dev/null | head -1 | tr -d '[:space:]')"
+RT_VERSION="${RT_VERSION:-dev}"
+RT_BUILD_DATE="$(date +%Y-%m-%d)"
 RESTORE_CONFIG=""
 cleanup() { [ -n "$RESTORE_CONFIG" ] && mv "$RESTORE_CONFIG" "$CONFIG_SWIFT" || true; }
 trap cleanup EXIT
-if [ -n "${RT_DEFAULT_SERVER_URL:-}" ]; then
-  echo "==> baking RT_DEFAULT_SERVER_URL=$RT_DEFAULT_SERVER_URL into the build"
-  RESTORE_CONFIG="$(mktemp)"
-  cp "$CONFIG_SWIFT" "$RESTORE_CONFIG"
-  # Replace ONLY the marked line; the trailing "// RT_DEFAULT_SERVER_URL" tag
-  # makes it unambiguous and idempotent.
-  python3 - "$CONFIG_SWIFT" "$RT_DEFAULT_SERVER_URL" <<'PY'
-import sys
-path, url = sys.argv[1], sys.argv[2]
-src = open(path).read().splitlines(keepends=True)
+echo "==> stamping version=$RT_VERSION build=$RT_BUILD_DATE${RT_DEFAULT_SERVER_URL:+, baking server URL=$RT_DEFAULT_SERVER_URL}"
+RESTORE_CONFIG="$(mktemp)"
+cp "$CONFIG_SWIFT" "$RESTORE_CONFIG"
+# Rewrite each marked AppConfig line (trailing tag makes it unambiguous/idempotent).
+RT_DEFAULT_SERVER_URL="${RT_DEFAULT_SERVER_URL:-}" \
+RT_VERSION="$RT_VERSION" RT_BUILD_DATE="$RT_BUILD_DATE" \
+python3 - "$CONFIG_SWIFT" <<'PY'
+import os, sys
+path = sys.argv[1]
+subs = {
+    "// RT_DEFAULT_SERVER_URL": ("defaultServerURL", os.environ.get("RT_DEFAULT_SERVER_URL", "")),
+    "// RT_VERSION":            ("version",          os.environ.get("RT_VERSION", "dev")),
+    "// RT_BUILD_DATE":         ("buildDate",        os.environ.get("RT_BUILD_DATE", "")),
+}
 out = []
-for line in src:
-    if line.rstrip().endswith("// RT_DEFAULT_SERVER_URL"):
-        indent = line[:len(line) - len(line.lstrip())]
-        esc = url.replace("\\", "\\\\").replace('"', '\\"')
-        out.append(f'{indent}static let defaultServerURL = "{esc}"  // RT_DEFAULT_SERVER_URL\n')
-    else:
+for line in open(path).read().splitlines(keepends=True):
+    rewrote = False
+    for tag, (name, val) in subs.items():
+        if line.rstrip().endswith(tag):
+            indent = line[:len(line) - len(line.lstrip())]
+            esc = val.replace("\\", "\\\\").replace('"', '\\"')
+            out.append(f'{indent}static let {name} = "{esc}"  {tag}\n')
+            rewrote = True
+            break
+    if not rewrote:
         out.append(line)
 open(path, "w").write("".join(out))
 PY
-fi
 
 echo "==> swift build -c $CONFIG"
 swift build -c "$CONFIG"
@@ -57,8 +70,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleName</key><string>RealtimeTranslator</string>
   <key>CFBundleDisplayName</key><string>Realtime Translator</string>
   <key>CFBundleIdentifier</key><string>$BUNDLE_ID</string>
-  <key>CFBundleVersion</key><string>1</string>
-  <key>CFBundleShortVersionString</key><string>1.0</string>
+  <key>CFBundleVersion</key><string>${RT_BUILD_DATE}</string>
+  <key>CFBundleShortVersionString</key><string>${RT_VERSION#v}</string>
   <key>CFBundleExecutable</key><string>RealtimeTranslator</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>LSMinimumSystemVersion</key><string>14.0</string>

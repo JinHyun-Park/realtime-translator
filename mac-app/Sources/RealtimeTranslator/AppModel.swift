@@ -17,6 +17,14 @@ import UniformTypeIdentifiers
 enum AppConfig {
     // BUILD-INJECTED: bundle.sh replaces the value below when RT_DEFAULT_SERVER_URL is set.
     static let defaultServerURL = ""  // RT_DEFAULT_SERVER_URL
+    // BUILD-INJECTED: bundle.sh stamps these from the VERSION file + build date.
+    static let version = "dev"          // RT_VERSION
+    static let buildDate = ""           // RT_BUILD_DATE
+    /// e.g. "v1.3 (2026-06-21)" — shown small at the bottom of the control panel
+    /// so a recipient can tell which build they're on.
+    static var versionLabel: String {
+        buildDate.isEmpty ? version : "\(version) (\(buildDate))"
+    }
 }
 
 /// Diagnostic logger. Writes to BOTH stdout (for direct runs) and a fixed file
