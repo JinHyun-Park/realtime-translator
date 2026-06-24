@@ -82,7 +82,7 @@ async def archive_session(meta: dict, day: str, epoch_ms: int,
     summary = {}
     try:
         from translator import generate_insight
-        convo = [f"{('ME' if x.get('stream')=='mic' else 'THEM')}: "
+        convo = [f"{('ME' if x.get('stream') in ('me','mic') else 'THEM')}: "
                  f"{x.get('translation') or x.get('source','')}" for x in lines]
         if convo:
             summary = await generate_insight("", convo, "final", meta.get("lang", "ko"))
@@ -90,8 +90,23 @@ async def archive_session(meta: dict, day: str, epoch_ms: int,
         log.warning("archive summary failed: %s", e.__class__.__name__)
         summary = {"error": "summary generation failed"}
 
+    # Cleaned transcript: one Bedrock pass that de-fillers, fixes ASR mishears/
+    # punctuation, merges split sentences and lightly repairs nonsense — for BOTH
+    # source and translation. Stored ALONGSIDE the raw transcript (never replacing
+    # it); the dashboard shows cleaned by default with a raw toggle. Best-effort:
+    # on any failure we just omit it and the dashboard falls back to raw.
+    transcript_clean = None
+    if settings.CLEAN_TRANSCRIPT:
+        try:
+            from translator import clean_transcript
+            transcript_clean = await clean_transcript(lines)
+        except Exception as e:
+            log.warning("archive clean failed: %s", e.__class__.__name__)
+
     record = {**meta, "truncated": truncated, "lines": len(lines),
               "transcript": lines, "summary": summary}
+    if transcript_clean:
+        record["transcript_clean"] = transcript_clean
     try:
         await asyncio.to_thread(
             _put_sync, key, json.dumps(record, ensure_ascii=False).encode())

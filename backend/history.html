@@ -80,6 +80,9 @@
     keyPoints:{ko:"핵심 포인트", ja:"要点", en:"Key points"},
     nextActions:{ko:"다음 액션", ja:"ネクストアクション", en:"Next actions"},
     transcript:{ko:"전사 (원문 → 번역)", ja:"文字起こし（原文 → 翻訳）", en:"Transcript (source → translation)"},
+    showRaw:  {ko:"원문 그대로 보기", ja:"元のまま表示", en:"Show raw"},
+    showClean:{ko:"다듬은 버전 보기", ja:"整形版を表示", en:"Show cleaned"},
+    cleanedNote:{ko:"AI가 다듬은 전사입니다 (음성인식 오류·군말 정리, 끊긴 문장 합침).", ja:"AIが整形した文字起こしです（認識ミス・言い淀みを整理し、分割された文を結合）。", en:"AI-cleaned transcript (ASR errors & fillers removed, split sentences merged)."},
     keyWrong: {ko:"접속 비밀번호가 올바르지 않습니다.", ja:"接続パスワードが正しくありません。", en:"Wrong access password."},
     rsWrong:  {ko:"방 비번이 올바르지 않습니다.", ja:"ルームのパスワードが正しくありません。", en:"Wrong room password."},
     loadFail: {ko:"불러오기 실패", ja:"読み込み失敗", en:"Load failed"},
@@ -152,24 +155,47 @@
   }
   async function openOne(encId){
     if(!encId){ return; }
+    showRaw=false;   // each session opens on the cleaned view
     var dl=document.getElementById("detail"), b=document.getElementById("dBody");
     b.innerHTML="<p class='src'>"+T("loading")+"</p>"; dl.style.display="block";
     try {
       var r=await fetch("/history/get?"+q("&id="+encId),{cache:"no-store"});
       if(r.status!==200){ b.innerHTML="<p class='err'>"+T("loadFail")+" ("+r.status+")</p>"; return; }
-      var d=await r.json(), sm=d.summary||{}, h="";
-      document.getElementById("dTitle").textContent=T("detail")+" · "+(d.lines||0)+T("sentences")+(d.truncated?T("truncated"):"");
-      if(sm.summary){ h+="<h3>"+T("keySummary")+"</h3><p>"+esc(sm.summary)+"</p>"; }
-      if((sm.key_points||[]).length){ h+="<h3>"+T("keyPoints")+"</h3><ul>"+sm.key_points.map(function(p){return "<li>"+esc(p)+"</li>";}).join("")+"</ul>"; }
-      if((sm.next_actions||[]).length){ h+="<h3>"+T("nextActions")+"</h3><ul>"+sm.next_actions.map(function(p){return "<li>"+esc(p)+"</li>";}).join("")+"</ul>"; }
-      h+="<h3>"+T("transcript")+"</h3>";
-      h+=(d.transcript||[]).map(function(t){
-        var who=(t.stream==="mic")?"ME":"THEM", c=(t.stream==="mic")?"#79c0ff":"#3fb950";
-        return "<div class='line'><span class='who' style='color:"+c+"'>"+who+"</span> "
-          +"<span class='src'>"+esc(t.source)+"</span><br><span class='tr'>"+esc(t.translation)+"</span></div>";
-      }).join("");
-      b.innerHTML=h;
+      var d=await r.json();
+      renderDetail(d);
     } catch(e){ b.innerHTML="<p class='err'>"+T("connErr")+"</p>"; }
+  }
+
+  // A cleaned transcript (transcript_clean) is shown by default; the raw one is
+  // one toggle away. Older sessions archived before cleanup existed have no
+  // transcript_clean, so we silently fall back to raw (no toggle shown).
+  var showRaw = false;
+  function lineHTML(t){
+    // mic is tagged "me" (older data may say "mic"); everything else is "them".
+    var me=(t.stream==="me"||t.stream==="mic");
+    var who=me?"ME":"THEM", c=me?"#79c0ff":"#3fb950";
+    return "<div class='line'><span class='who' style='color:"+c+"'>"+who+"</span> "
+      +"<span class='src'>"+esc(t.source)+"</span><br><span class='tr'>"+esc(t.translation)+"</span></div>";
+  }
+  function renderDetail(d){
+    var b=document.getElementById("dBody"), sm=d.summary||{}, h="";
+    var hasClean=!!(d.transcript_clean && d.transcript_clean.length);
+    document.getElementById("dTitle").textContent=T("detail")+" · "+(d.lines||0)+T("sentences")+(d.truncated?T("truncated"):"");
+    if(sm.summary){ h+="<h3>"+T("keySummary")+"</h3><p>"+esc(sm.summary)+"</p>"; }
+    if((sm.key_points||[]).length){ h+="<h3>"+T("keyPoints")+"</h3><ul>"+sm.key_points.map(function(p){return "<li>"+esc(p)+"</li>";}).join("")+"</ul>"; }
+    if((sm.next_actions||[]).length){ h+="<h3>"+T("nextActions")+"</h3><ul>"+sm.next_actions.map(function(p){return "<li>"+esc(p)+"</li>";}).join("")+"</ul>"; }
+    h+="<h3 style='display:flex;align-items:center;gap:10px'>"+T("transcript");
+    if(hasClean){
+      h+="<button id='rawToggle' style='font:12px system-ui;background:#21262d;color:#e6edf3;border:1px solid #30363d;border-radius:6px;padding:3px 9px;cursor:pointer'>"
+        +(showRaw?T("showClean"):T("showRaw"))+"</button>";
+    }
+    h+="</h3>";
+    if(hasClean && !showRaw){ h+="<p class='src' style='margin:-4px 0 8px;opacity:.7'>"+T("cleanedNote")+"</p>"; }
+    var rows=(hasClean && !showRaw) ? d.transcript_clean : (d.transcript||[]);
+    h+=rows.filter(function(t){return !t.truncated;}).map(lineHTML).join("");
+    b.innerHTML=h;
+    var tb=document.getElementById("rawToggle");
+    if(tb){ tb.onclick=function(){ showRaw=!showRaw; renderDetail(d); }; }
   }
   load();
 </script>

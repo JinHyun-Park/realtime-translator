@@ -187,6 +187,13 @@ class Settings:
     # final wrap sends more so nothing important is missed.
     INSIGHT_LIVE_TRANSCRIPT_LINES = _i("RT_INSIGHT_LIVE_LINES", 40)
     INSIGHT_FINAL_TRANSCRIPT_LINES = _i("RT_INSIGHT_FINAL_LINES", 400)
+    # Transcript cleanup (session end): one Bedrock pass that de-filler-words,
+    # fixes obvious ASR mishears/punctuation, merges sentences split across
+    # segments, and lightly repairs nonsense — both source AND translation.
+    # Output is roughly the same size as the input, so allow generous room.
+    CLEAN_TRANSCRIPT = _s("RT_CLEAN_TRANSCRIPT", "1") == "1"
+    CLEAN_MAX_TOKENS = _i("RT_CLEAN_MAX_TOKENS", 8000)
+    CLEAN_MAX_LINES = _i("RT_CLEAN_MAX_LINES", 400)
 
     @property
     def host_is_loopback(self) -> bool:

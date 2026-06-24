@@ -308,3 +308,127 @@ def _parse_insight_json(text: str, mode: str) -> dict:
         "summary": str(obj.get("summary", "")),
         "questions": [str(x) for x in (obj.get("questions") or [])],
     }
+
+
+# ---------------------------------------------------------------------------
+# Transcript cleanup (session end, server-side, NO app change).
+#
+# The live path stores each utterance as {source: <raw whisper text>,
+# translation: <MT output>}. Raw whisper is verbatim — filler words ("음/어/
+# えーと"), mis-hearings, missing punctuation, and a single sentence split
+# across two pause-separated segments. This makes ONE Bedrock pass over the
+# whole session that tidies BOTH source and translation: drops fillers, fixes
+# obvious mishears/punctuation/spacing, merges sentences split across lines,
+# and lightly repairs nonsense by inferring intent from context — WITHOUT
+# rewriting into stiff prose or inventing content. Output is stored alongside
+# (never replacing) the raw transcript; the dashboard shows cleaned by default
+# with a raw toggle.
+# ---------------------------------------------------------------------------
+
+_CLEAN_SYSTEM = (
+    "You clean up a raw, machine-transcribed bilingual (Korean/Japanese/English) "
+    "conversation transcript so it reads naturally, WITHOUT changing what was said.\n"
+    "Each input line has an index, a speaker tag (ME or THEM), the raw ASR "
+    "'source' text, and its machine 'translation'. Your job, per the cleaned "
+    "output:\n"
+    "1. Remove filler words and false starts (음, 어, 그, えーと, あの, um, uh, "
+    "like) and stutters/repeats.\n"
+    "2. Fix obvious ASR mishearings, punctuation, spacing and casing using "
+    "context. If a phrase is garbled/nonsensical, infer the most likely intended "
+    "meaning from surrounding lines and write that — but NEVER invent facts, "
+    "numbers, names or topics that aren't there.\n"
+    "3. MERGE lines when one sentence was split across consecutive same-speaker "
+    "lines (ASR cut on a breath/pause). Likewise SPLIT a line if it clearly runs "
+    "two sentences together. Keep ME/THEM speaker boundaries intact — never merge "
+    "across speakers.\n"
+    "4. Clean the 'translation' the SAME way and keep it faithful to the cleaned "
+    "source. If you merge/split source lines, merge/split the translation to "
+    "match so they stay paired.\n"
+    "Do NOT over-formalize: keep the speaker's natural, conversational register. "
+    "Do NOT summarize or drop substantive content. Preserve original order.\n"
+    "Output ONLY a single JSON object: {\"lines\": [{\"stream\": \"mic\"|\"sys\", "
+    "\"source\": string, \"translation\": string}, ...]}. No markdown, no prose."
+)
+
+
+def _is_me(stream) -> bool:
+    # The mic stream is tagged "me" by the app (RelayClient.streamTag); be lenient
+    # and also accept "mic" in case older/other producers used that.
+    return stream in ("me", "mic")
+
+
+def _clean_user_prompt(lines: list[dict]) -> str:
+    rows = []
+    for i, x in enumerate(lines):
+        tag = "ME" if _is_me(x.get("stream")) else "THEM"
+        src = (x.get("source") or "").replace("\n", " ").strip()
+        tr = (x.get("translation") or "").replace("\n", " ").strip()
+        rows.append(f"[{i}] ({tag}) source: {src}\n     translation: {tr}")
+    body = "\n".join(rows) if rows else "(empty)"
+    return (
+        "=== RAW TRANSCRIPT (oldest first; ME = the user's mic, THEM = the other "
+        "side / system audio) ===\n" + body + "\n\n=== TASK ===\n"
+        "Return the cleaned transcript as JSON: {\"lines\": [{\"stream\", "
+        "\"source\", \"translation\"}, ...]}. Use \"me\" for ME lines and \"them\" "
+        "for THEM lines. The cleaned line count may differ from the input because "
+        "of merges/splits — that is expected."
+    )
+
+
+async def clean_transcript(lines: list[dict]) -> list[dict] | None:
+    """One Bedrock Claude pass that returns a cleaned copy of `lines`
+    (de-fillered, mishear/punctuation-fixed, split-sentences merged, nonsense
+    lightly repaired) for BOTH source and translation. Returns the cleaned list
+    of {stream, source, translation} dicts, or None on any failure (caller keeps
+    raw-only). Never raises."""
+    from anthropic import AsyncAnthropicBedrock
+
+    real = [x for x in lines if not x.get("truncated")]
+    if not real:
+        return None
+    real = real[: settings.CLEAN_MAX_LINES]
+    client = AsyncAnthropicBedrock(aws_region=settings.BEDROCK_REGION)
+    try:
+        resp = await client.messages.create(
+            model=settings.BEDROCK_MODEL,
+            max_tokens=settings.CLEAN_MAX_TOKENS,
+            system=[{"type": "text", "text": _CLEAN_SYSTEM}],
+            messages=[{"role": "user", "content": _clean_user_prompt(real)}],
+            timeout=settings.LLM_TIMEOUT * 3,   # whole-session pass, bigger than a subtitle
+        )
+        text = "".join(b.text for b in resp.content
+                       if getattr(b, "type", None) == "text").strip()
+    except Exception as e:
+        log.warning("clean_transcript bedrock error: %s", e.__class__.__name__)
+        return None
+    return _parse_clean_json(text)
+
+
+def _parse_clean_json(text: str) -> list[dict] | None:
+    s = text.strip()
+    if s.startswith("```"):
+        s = s.strip("`")
+        if s[:4].lower() == "json":
+            s = s[4:]
+    a, b = s.find("{"), s.rfind("}")
+    if a != -1 and b != -1 and b > a:
+        s = s[a:b + 1]
+    try:
+        obj = json.loads(s)
+        rows = obj.get("lines") if isinstance(obj, dict) else None
+        if not isinstance(rows, list):
+            return None
+    except Exception:
+        log.warning("clean_transcript JSON parse failed")
+        return None
+    out = []
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        stream = "me" if _is_me(r.get("stream")) else "them"
+        out.append({
+            "stream": stream,
+            "source": str(r.get("source", "")),
+            "translation": str(r.get("translation", "")),
+        })
+    return out or None
