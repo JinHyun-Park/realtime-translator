@@ -119,14 +119,18 @@ fi
 sed -i "s|--gpu-memory-utilization [0-9.]*|--gpu-memory-utilization $VLLM_GPU_UTIL|" \
   /etc/systemd/system/rt-vllm.service
 # Update relay env lines in place (idempotent).
-set_env() { # key value
+set_env() { # key value — update in place if present, else append under [Service].
   if grep -q "Environment=$1=" /etc/systemd/system/rt-relay.service; then
     sed -i "s|Environment=$1=.*|Environment=$1=$2|" /etc/systemd/system/rt-relay.service
+  else
+    sed -i "/^\[Service\]/a Environment=$1=$2" /etc/systemd/system/rt-relay.service
   fi
 }
 set_env RT_ASR_WORKERS "$ASR_WORKERS"
 set_env RT_ASR_NUM_GPUS "$ASR_GPUS"
 set_env RT_RELAY_TOKEN "$RELAY_TOKEN"
+# Idle auto-stop OFF: shared always-on box (see userdata.sh for the rationale).
+set_env RT_IDLE_STOP_ENABLED "0"
 sed -i "s|Environment=CUDA_VISIBLE_DEVICES=.*|Environment=CUDA_VISIBLE_DEVICES=$ASR_CUDA|" \
   /etc/systemd/system/rt-relay.service
 

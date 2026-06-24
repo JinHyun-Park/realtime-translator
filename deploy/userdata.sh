@@ -115,6 +115,11 @@ Environment=RT_MAX_SEGMENT_MS=15000
 Environment=RT_HOST=0.0.0.0
 Environment=RT_PORT=8765
 Environment=RT_RELAY_TOKEN=__RELAY_TOKEN__
+# Idle auto-stop DISABLED: this box is a shared always-on server (the owner's
+# build + the shared build hit the same relay). Viewers don't count as capture
+# sessions, so a viewers-only / idle-but-wanted box would otherwise self-stop.
+# Wake-on-demand (rt-wake Lambda) still works; nothing here turns the box ON.
+Environment=RT_IDLE_STOP_ENABLED=0
 Environment=HF_HOME=/opt/hf-cache
 ExecStart=/usr/bin/python3 server.py
 Restart=always
