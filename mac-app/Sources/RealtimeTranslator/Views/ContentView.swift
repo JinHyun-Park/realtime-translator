@@ -91,6 +91,22 @@ struct ControlPanel: View {
                         .controlSize(.regular)
                         Text(L10n.t("server.history.help"))
                             .font(.caption2).foregroundStyle(.secondary)
+                        Divider()
+                        // PANIC: if something sensitive slips on-air, wipe every
+                        // viewer's screen instantly (no confirm — speed matters).
+                        Button(role: .destructive) {
+                            model.clearViewers()
+                        } label: {
+                            Label(L10n.t("server.clearViewers"), systemImage: "eye.slash")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .controlSize(.regular)
+                        Text(L10n.t("server.clearViewers.help"))
+                            .font(.caption2).foregroundStyle(.secondary)
+                        if !model.clearViewersStatus.isEmpty {
+                            Text(model.clearViewersStatus)
+                                .font(.caption2).foregroundStyle(.secondary)
+                        }
                     }.padding(6)
                 }
 

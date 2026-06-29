@@ -103,6 +103,19 @@
     dotEl.className = state || "";
   }
 
+  // Panic wipe from the operator (/control/clear): blank every accumulated line
+  // and bring back the "waiting" placeholder, as if the tab were freshly opened.
+  function clearLog() {
+    logEl.innerHTML = "";
+    interimNodes = {};
+    if (!emptyEl) {
+      emptyEl = document.createElement("div");
+      emptyEl.id = "empty";
+      document.body.appendChild(emptyEl);
+    }
+    emptyEl.textContent = "자막을 기다리는 중입니다 / waiting for speech…";
+  }
+
   function connect() {
     ws = new WebSocket(buildURL());
     ws.onopen = function () {
@@ -114,6 +127,7 @@
       var m; try { m = JSON.parse(ev.data); } catch (e) { return; }
       if (m.type === "final") render(m, true);
       else if (m.type === "interim") render(m, false);
+      else if (m.type === "clear") clearLog();
     };
     ws.onclose = function (ev) {
       // 4401 = wrong/missing password: clear it and re-prompt instead of looping.

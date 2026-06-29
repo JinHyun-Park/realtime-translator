@@ -253,6 +253,8 @@ final class AppModel: ObservableObject {
         didSet { UserDefaults.standard.set(punctSilenceMs, forKey: "punctSilenceMs") }
     }
     @Published var endpointControlStatus = ""
+    // Result of the last "clear viewers" panic wipe (shown next to the button).
+    @Published var clearViewersStatus = ""
 
     // --- Live insight (meeting copilot over the transcript) -------------------
     // SEPARATE from translation. When enabled, every N new finals the app POSTs
@@ -898,6 +900,40 @@ final class AppModel: ObservableObject {
     func clearTranscript() {
         lines.removeAll()
         micInterim = nil; sysInterim = nil
+    }
+
+    /// PANIC WIPE for the public viewers. Tells the relay to blank every viewer
+    /// browser in our room RIGHT NOW (for when something sensitive slips on-air).
+    /// The relay keeps no backlog, so this only clears the live viewer DOM;
+    /// new/reloaded viewers already start empty. Our own app transcript and the
+    /// on-disk autosave are left intact (use clearTranscript() for the local view).
+    func clearViewers() {
+        guard let url = controlURL("control/clear", [
+            URLQueryItem(name: "room", value: effectiveRoom),
+        ]) else { clearViewersStatus = L10n.t("st.serverURLError"); return }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.httpMethod = "POST"
+        if !accessKey.isEmpty { req.setValue(accessKey, forHTTPHeaderField: "X-Wake-Token") }
+        rtlog("clearViewers room=\(effectiveRoom)")
+        Task { [weak self] in
+            do {
+                let (_, resp) = try await URLSession.shared.data(for: req)
+                let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+                await MainActor.run {
+                    if code == 401 || code == 403 {
+                        self?.clearViewersStatus = L10n.t("st.pwErrorNotApplied")
+                    } else if code == 200 {
+                        self?.clearViewersStatus = L10n.t("st.viewersCleared")
+                    } else if code == 502 || code == 504 {
+                        self?.clearViewersStatus = L10n.t("st.serverOffReapply")
+                    } else {
+                        self?.clearViewersStatus = L10n.t("st.applyFail", "\(code)")
+                    }
+                }
+            } catch {
+                await MainActor.run { self?.clearViewersStatus = L10n.t("st.noResponseMaybeOff") }
+            }
+        }
     }
 
     /// Reveal the auto-saved transcripts folder in Finder.

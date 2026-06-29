@@ -39,6 +39,8 @@ enum L10n {
         "server.viewBrowser.help": [.ko: "팀원과 함께 볼 땐 이 페이지 주소를 공유하세요 (비번 입력하면 시청).", .ja: "チームと見るときはこのページのURLを共有してください（パスワードを入力すれば視聴可）。", .en: "To watch with teammates, share this page URL (they enter the password)."],
         "server.history": [.ko: "지난 회의 기록 보기 (전사·요약)", .ja: "過去の会議の記録を見る（文字起こし・要約）", .en: "Past meeting records (transcript & summary)"],
         "server.history.help": [.ko: "이 방의 끝난 회의들의 전체 전사와 요약·다음 액션을 브라우저에서 봅니다.", .ja: "このルームの終了した会議の全文文字起こしと要約・ネクストアクションをブラウザで表示します。", .en: "View this room's finished meetings — full transcript + summary + next actions — in the browser."],
+        "server.clearViewers": [.ko: "보고 있는 모든 자막 즉시 지우기", .ja: "視聴中の字幕をすべて即時クリア", .en: "Wipe all viewers' subtitles now"],
+        "server.clearViewers.help": [.ko: "실수로 민감한 내용이 자막에 나갔을 때, 지금 보고 있는 모든 사람의 화면에서 쌓인 자막을 즉시 비웁니다. (내 앱 기록·저장 파일은 그대로)", .ja: "機密情報がうっかり字幕に出たとき、視聴中の全員の画面に溜まった字幕を即座に消去します。（自分のアプリ記録・保存ファイルはそのまま）", .en: "If something sensitive slips on-air, instantly blanks the accumulated subtitles on every current viewer's screen. (Your own app transcript & saved files stay intact.)"],
 
         // --- Translation model ---
         "model.title": [.ko: "번역 모델", .ja: "翻訳モデル", .en: "Translation model"],
@@ -91,6 +93,7 @@ enum L10n {
         "st.noResponse": [.ko: "서버 응답 없음", .ja: "サーバー応答なし", .en: "No server response"],
         "st.noResponseMaybeOff": [.ko: "서버 응답 없음 (꺼져 있을 수 있음)", .ja: "サーバー応答なし（オフの可能性）", .en: "No response (may be off)"],
         "st.applyFail": [.ko: "적용 실패 (%@)", .ja: "適用失敗 (%@)", .en: "Apply failed (%@)"],
+        "st.viewersCleared": [.ko: "뷰어 화면 비움 완료", .ja: "ビューア画面をクリアしました", .en: "Viewers cleared"],
         "st.waking": [.ko: "서버 깨우는 중…", .ja: "サーバーを起動中…", .en: "Waking server…"],
         "st.wakingLong": [.ko: "서버 깨우는 중… 모델 로딩 ~5분 남음", .ja: "サーバー起動中… モデル読み込み残り～5分", .en: "Waking server… ~5 min for the model to load"],
         "st.booting": [.ko: "서버 부팅 중…", .ja: "サーバー起動中…", .en: "Server booting…"],

@@ -170,6 +170,21 @@ async def broadcast(payload: dict, room: str):
         viewers.discard(v)
 
 
+async def kick_viewers(room: str, code: int = 4403, reason: str = "room locked") -> int:
+    # Force-close EVERY currently-connected viewer in `room`. Used when a room
+    # secret is set/rotated: the on-connect check only runs at handshake, so live
+    # sockets survive a secret change until we actively drop them. After this,
+    # their auto-reconnect re-hits the secret gate and is refused (4403) unless
+    # they present the new secret. Captures are untouched.
+    viewers = list(VIEWERS_BY_ROOM.get(room, ()))
+    for v in viewers:
+        try:
+            await v.close(code=code, reason=reason)
+        except Exception:
+            pass
+    return len(viewers)
+
+
 def _ws_path(ws) -> str:
     return (getattr(getattr(ws, "request", None), "path", None)
             or getattr(ws, "path", "") or "")
@@ -679,11 +694,19 @@ async def _serve_http(port: int = 9000):
                 new_secret = (qs.get("new") or [""])[0]
                 from room_auth import change_secret
                 ok = await change_secret(room, current, new_secret)
-                body = json.dumps({"ok": ok, "room": room,
+                kicked = 0
+                if ok:
+                    # Drop everyone currently watching so the new secret actually
+                    # takes effect NOW (live sockets bypass the handshake gate).
+                    # Their reconnect without the new secret is refused (4403).
+                    kicked = await kick_viewers(room)
+                    log.warning("room-secret changed -> room=%s kicked %d viewers",
+                                room, kicked)
+                body = json.dumps({"ok": ok, "room": room, "kicked": kicked,
                                    "error": None if ok else "wrong current secret or empty new"}).encode()
                 ctype = b"application/json"
             elif path in (b"/control/idle", b"/control/stop", b"/control/llm",
-                          b"/control/endpoint"):
+                          b"/control/endpoint", b"/control/clear"):
                 # Token-gated controls the app drives. /control/idle flips
                 # auto-stop on/off and sets the timeout live; /control/stop stops
                 # the box right now; /control/llm switches the translation model
@@ -698,6 +721,17 @@ async def _serve_http(port: int = 9000):
                     log.warning("manual /control/stop — stopping box now")
                     asyncio.create_task(_self_stop())
                     body = json.dumps({"ok": True, "stopping": True}).encode()
+                elif path == b"/control/clear":
+                    # PANIC WIPE: tell every viewer in this room to blank its
+                    # on-screen subtitle log NOW. The relay keeps no backlog, so
+                    # this only clears the live viewer DOM (long-lived browser tabs
+                    # that have accumulated lines). New/reloaded viewers already
+                    # start empty. Captures/transcripts on the app are untouched.
+                    room = (qs.get("room") or [DEFAULT_ROOM])[0].strip() or DEFAULT_ROOM
+                    n = len(VIEWERS_BY_ROOM.get(room, ()))
+                    await broadcast({"type": "clear"}, room)
+                    log.warning("control/clear -> room=%s viewers=%d wiped", room, n)
+                    body = json.dumps({"ok": True, "room": room, "viewers": n}).encode()
                 elif path == b"/control/llm":
                     # ?provider=bedrock | vllm  — live translation-model switch.
                     from translator import LLM
