@@ -703,6 +703,12 @@ final class AppModel: ObservableObject {
         epoch += 1
         micInterim = nil; sysInterim = nil
         micFlow.reset(); sysFlow.reset()
+        // Arm the system-audio watchdog fresh for this session.
+        sysWatchdogLastSamples = 0
+        sysWatchdogLastGrowth = Date()
+        sysRestartAttempts = 0
+        sysRestarting = false
+        audioWarning = ""
 
         // New autosave file per Start — every final line is written to disk
         // immediately, so a quit/crash never loses the transcript.
@@ -738,6 +744,7 @@ final class AppModel: ObservableObject {
                 guard let self else { return }
                 let m = self.micFlow.snapshot, s = self.sysFlow.snapshot
                 self.flowInfo = "mic \(m.samples/1000)k→\(m.chunks) [\(self.micClient.isConnected ? "✓" : "✗")] · sys \(s.samples/1000)k→\(s.chunks) [\(self.sysClient.isConnected ? "✓" : "✗")]"
+                self.checkSysWatchdog(sysSamples: s.samples)
             }
         }
     }
@@ -746,6 +753,90 @@ final class AppModel: ObservableObject {
     private let micFlow = FlowCounter()
     private let sysFlow = FlowCounter()
     private var dbgTimer: Timer?
+
+    // --- System-audio watchdog -------------------------------------------------
+    // ScreenCaptureKit's stream can die SILENTLY (no error, no callback) — e.g.
+    // after a display/output-device change or when coreaudiod/replayd wedges. The
+    // app still looks "Listening…" while zero frames flow, so subtitles freeze
+    // with nobody noticing. We can't see an error, but we CAN see that frames
+    // stopped: sysFlow grows on every captured buffer (even during silence —
+    // SCStream delivers continuous near-zero buffers), so "no growth for 6s while
+    // we should be capturing" = a real stall, NOT just a quiet room.
+    //
+    // Recovery ladder: auto stop→start the capture up to sysMaxRestarts times
+    // (cheap, fixes transient drops); if frames still don't return it's a daemon
+    // wedge that a same-process restart can't clear, so we stop retrying and warn
+    // the user to relaunch (Cmd+Q) — a wedge needs a fresh process.
+    @Published var audioWarning = ""        // prominent banner when sys audio stalls
+    private let sysStallSeconds = 6.0
+    private let sysMaxRestarts = 2
+    private var sysWatchdogLastSamples = 0
+    private var sysWatchdogLastGrowth = Date()
+    private var sysRestartAttempts = 0
+    private var sysRestarting = false
+
+    @MainActor
+    private func checkSysWatchdog(sysSamples: Int) {
+        // Only watch when system audio is actually supposed to be flowing.
+        guard running, captureSystemAudio else { return }
+        guard #available(macOS 13.0, *) else { return }
+        if sysRestarting { return }   // a restart is in flight — don't pile on
+
+        if sysSamples > sysWatchdogLastSamples {
+            // Frames are flowing. If we'd previously warned/retried, we recovered.
+            sysWatchdogLastSamples = sysSamples
+            sysWatchdogLastGrowth = Date()
+            if sysRestartAttempts > 0 || !audioWarning.isEmpty {
+                sysRestartAttempts = 0
+                audioWarning = ""
+                rtlog("watchdog: sys audio recovered")
+            }
+            return
+        }
+        // No new frames since last tick — how long has it been stalled?
+        let stalled = Date().timeIntervalSince(sysWatchdogLastGrowth)
+        if stalled < sysStallSeconds { return }
+
+        if sysRestartAttempts >= sysMaxRestarts {
+            // Auto-recovery exhausted → warn only (a wedge needs a relaunch).
+            audioWarning = L10n.t("warn.sysAudioDead")
+            return
+        }
+        sysRestartAttempts += 1
+        audioWarning = L10n.t("warn.sysAudioReconnecting", sysRestartAttempts)
+        rtlog("watchdog: sys audio stalled \(Int(stalled))s — auto-restart \(sysRestartAttempts)/\(sysMaxRestarts)")
+        restartSystemAudio()
+    }
+
+    @MainActor
+    private func restartSystemAudio() {
+        guard #available(macOS 13.0, *) else { return }
+        sysRestarting = true
+        // Tear down the old (possibly wedged) stream before making a fresh one.
+        (sysCapture as? SystemAudioCapture)?.stop()
+        sysCapture = nil
+        let cap = SystemAudioCapture()
+        cap.onSamples = { [weak self] s in
+            guard let self else { return }
+            self.sysFlow.add(s.count)
+            self.sysClient.sendAudio(floatsToPCM16(s))
+        }
+        sysCapture = cap
+        Task {
+            do {
+                try await cap.start()
+                rtlog("watchdog: sys restart start() OK")
+            } catch {
+                rtlog("watchdog: sys restart FAILED: \(error.localizedDescription)")
+            }
+            await MainActor.run {
+                // Give the fresh stream a full stall-window to prove itself before
+                // the next check (acts as the inter-attempt cooldown).
+                self.sysWatchdogLastGrowth = Date()
+                self.sysRestarting = false
+            }
+        }
+    }
 
     private func requestMicThenStart() {
         // IMPORTANT: do all AVAudioEngine work OFF the main thread. Touching
@@ -826,6 +917,10 @@ final class AppModel: ObservableObject {
         status = "Stopped"
         serverPhase = .idle
         wakeDetail = ""
+        // Disarm the watchdog so a manual stop never shows a stall warning.
+        sysRestarting = false
+        sysRestartAttempts = 0
+        audioWarning = ""
     }
 
     func swapLanguages() {

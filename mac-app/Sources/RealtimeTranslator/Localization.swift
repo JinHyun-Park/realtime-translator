@@ -94,6 +94,8 @@ enum L10n {
         "st.noResponseMaybeOff": [.ko: "서버 응답 없음 (꺼져 있을 수 있음)", .ja: "サーバー応答なし（オフの可能性）", .en: "No response (may be off)"],
         "st.applyFail": [.ko: "적용 실패 (%@)", .ja: "適用失敗 (%@)", .en: "Apply failed (%@)"],
         "st.viewersCleared": [.ko: "뷰어 화면 비움 완료", .ja: "ビューア画面をクリアしました", .en: "Viewers cleared"],
+        "warn.sysAudioReconnecting": [.ko: "⚠️ 시스템 오디오 끊김 — 재연결 중… (%d)", .ja: "⚠️ システム音声が途切れました — 再接続中… (%d)", .en: "⚠️ System audio dropped — reconnecting… (%d)"],
+        "warn.sysAudioDead": [.ko: "⚠️ 시스템 오디오 복구 실패 — 앱을 완전히 종료(⌘Q) 후 다시 켜주세요", .ja: "⚠️ システム音声の復旧に失敗 — アプリを完全に終了（⌘Q）して再起動してください", .en: "⚠️ System audio recovery failed — quit the app (⌘Q) and reopen it"],
         "st.waking": [.ko: "서버 깨우는 중…", .ja: "サーバーを起動中…", .en: "Waking server…"],
         "st.wakingLong": [.ko: "서버 깨우는 중… 모델 로딩 ~5분 남음", .ja: "サーバー起動中… モデル読み込み残り～5分", .en: "Waking server… ~5 min for the model to load"],
         "st.booting": [.ko: "서버 부팅 중…", .ja: "サーバー起動中…", .en: "Server booting…"],

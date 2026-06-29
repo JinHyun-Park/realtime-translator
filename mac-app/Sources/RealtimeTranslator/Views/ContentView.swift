@@ -69,6 +69,17 @@ struct ControlPanel: View {
                                 .font(.caption2).monospaced()
                                 .foregroundStyle(.secondary)
                         }
+                        // System-audio watchdog banner: prominent so a silent
+                        // capture stall (frozen subtitles) can't go unnoticed.
+                        if !model.audioWarning.isEmpty {
+                            Text(model.audioWarning)
+                                .font(.caption).bold()
+                                .foregroundStyle(.white)
+                                .padding(.vertical, 6).padding(.horizontal, 10)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .background(Color.red.opacity(0.85))
+                                .cornerRadius(8)
+                        }
                         Divider()
                         // Open the broadcast viewer page in the browser — the live
                         // subtitle page teammates watch. Opens with the password
