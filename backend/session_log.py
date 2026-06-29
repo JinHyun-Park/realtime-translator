@@ -85,7 +85,14 @@ async def archive_session(meta: dict, day: str, epoch_ms: int,
         convo = [f"{('ME' if x.get('stream') in ('me','mic') else 'THEM')}: "
                  f"{x.get('translation') or x.get('source','')}" for x in lines]
         if convo:
-            summary = await generate_insight("", convo, "final", meta.get("lang", "ko"))
+            # End-of-session summary digests the WHOLE transcript at once, so it
+            # needs a far longer timeout than a live insight refresh — a long
+            # meeting (100+ lines) otherwise hits APITimeoutError and the archive
+            # saves {"error": ...} instead of a summary (the dashboard then shows
+            # one stream summarized and the other blank). Mirror clean_transcript.
+            summary = await generate_insight(
+                "", convo, "final", meta.get("lang", "ko"),
+                timeout=settings.LLM_TIMEOUT * 3)
     except Exception as e:
         log.warning("archive summary failed: %s", e.__class__.__name__)
         summary = {"error": "summary generation failed"}

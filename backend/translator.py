@@ -250,11 +250,17 @@ def _insight_user_prompt(context: str, transcript_lines: list[str], mode: str,
 
 
 async def generate_insight(context: str, transcript_lines: list[str], mode: str,
-                           lang: str = "ko") -> dict:
+                           lang: str = "ko", timeout: float | None = None) -> dict:
     """One-shot Bedrock Claude call producing the insight JSON for `mode`
     ("live" | "final"), with output in `lang` (ko|ja|en). Returns the parsed
     dict, or {"error": "..."} on failure (the app shows the error; insight is
-    opt-in so we don't fall back to Qwen)."""
+    opt-in so we don't fall back to Qwen).
+
+    `timeout` overrides the request timeout (seconds). Live insight wants the
+    snappy default (LLM_TIMEOUT), but the end-of-session summary digests up to
+    INSIGHT_FINAL_LINES at once and needs much longer — a long meeting otherwise
+    times out and the archive saves an error instead of a summary. The archive
+    caller passes a bigger value (mirrors clean_transcript's LLM_TIMEOUT*3)."""
     from anthropic import AsyncAnthropicBedrock
 
     if lang not in _LANG_NAME:
@@ -269,7 +275,7 @@ async def generate_insight(context: str, transcript_lines: list[str], mode: str,
             system=[{"type": "text", "text": _insight_system(lang)}],
             messages=[{"role": "user",
                        "content": _insight_user_prompt(context, transcript_lines, mode, lang)}],
-            timeout=settings.LLM_TIMEOUT,
+            timeout=timeout if timeout is not None else settings.LLM_TIMEOUT,
         )
         text = "".join(b.text for b in resp.content
                        if getattr(b, "type", None) == "text").strip()
