@@ -42,3 +42,7 @@ SHARED_*.md
 *SHARED*.md
 mac-app/SHARED_*
 deploy/.shared-recipient
+
+# Project-internal agent context — local-only, never publish (infra IDs inside)
+/CLAUDE.md
+/.kiro/

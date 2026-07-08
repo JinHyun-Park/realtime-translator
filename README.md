@@ -9,6 +9,8 @@ Default pair is **Korean ↔ Japanese** (it auto-detects which side spoke); **En
 is also supported, and any pair works as long as the models do. The app's own
 interface (labels, insight, history) also speaks **Korean / Japanese / English**.
 
+> **New here? / 처음이신가요?** — [**QUICKSTART.md**](QUICKSTART.md) is a one-page intro + how-to-use, in English and Korean. This README is the full technical reference.
+
 ![Realtime Translator — live translation with the insight panel and language picker](docs/screenshot.png)
 
 ```
