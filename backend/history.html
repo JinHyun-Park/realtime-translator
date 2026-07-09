@@ -83,6 +83,7 @@
     showRaw:  {ko:"원문 그대로 보기", ja:"元のまま表示", en:"Show raw"},
     showClean:{ko:"다듬은 버전 보기", ja:"整形版を表示", en:"Show cleaned"},
     cleanedNote:{ko:"AI가 다듬은 전사입니다 (음성인식 오류·군말 정리, 끊긴 문장 합침).", ja:"AIが整形した文字起こしです（認識ミス・言い淀みを整理し、分割された文を結合）。", en:"AI-cleaned transcript (ASR errors & fillers removed, split sentences merged)."},
+    corrections:{ko:"단어 교정 내역", ja:"単語の修正履歴", en:"Word corrections"},
     keyWrong: {ko:"접속 비밀번호가 올바르지 않습니다.", ja:"接続パスワードが正しくありません。", en:"Wrong access password."},
     rsWrong:  {ko:"방 비번이 올바르지 않습니다.", ja:"ルームのパスワードが正しくありません。", en:"Wrong room password."},
     loadFail: {ko:"불러오기 실패", ja:"読み込み失敗", en:"Load failed"},
@@ -193,6 +194,15 @@
     if(hasClean && !showRaw){ h+="<p class='src' style='margin:-4px 0 8px;opacity:.7'>"+T("cleanedNote")+"</p>"; }
     var rows=(hasClean && !showRaw) ? d.transcript_clean : (d.transcript||[]);
     h+=rows.filter(function(t){return !t.truncated;}).map(lineHTML).join("");
+    // Audit list of STT word-level fixes the clean pass made (misheard words
+    // re-classified from context, term normalizations). Only on cleaned view.
+    if(hasClean && !showRaw && (d.corrections||[]).length){
+      h+="<h3>"+T("corrections")+"</h3><ul>"+d.corrections.map(function(c){
+        return "<li><span class='src' style='text-decoration:line-through;opacity:.6'>"+esc(c.before)
+          +"</span> → <b>"+esc(c.after)+"</b>"
+          +(c.reason?" <span class='src' style='opacity:.7'>— "+esc(c.reason)+"</span>":"")+"</li>";
+      }).join("")+"</ul>";
+    }
     b.innerHTML=h;
     var tb=document.getElementById("rawToggle");
     if(tb){ tb.onclick=function(){ showRaw=!showRaw; renderDetail(d); }; }

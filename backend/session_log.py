@@ -78,12 +78,33 @@ async def archive_session(meta: dict, day: str, epoch_ms: int,
     room = (meta.get("room") or "default").replace("/", "_")
     key = f"sessions/{day}/{epoch_ms}-{room}.transcript.json"
 
-    # Auto summary + next actions from the transcript (final-wrap insight).
+    # Cleaned transcript FIRST: one Bedrock pass that de-fillers, fixes STT
+    # mishears (similar-sounding wrong words re-classified from whole-session
+    # context, terms normalized across lines), merges split sentences — for BOTH
+    # source and translation. Runs BEFORE the summary so the summary digests the
+    # corrected text instead of raw ASR (a misheard product name would otherwise
+    # propagate into the summary/next-actions). Stored ALONGSIDE the raw
+    # transcript (never replacing it); the dashboard shows cleaned by default
+    # with a raw toggle. Best-effort: on any failure we omit it, the dashboard
+    # falls back to raw, and the summary uses the raw lines.
+    transcript_clean = None
+    corrections = None
+    if settings.CLEAN_TRANSCRIPT:
+        try:
+            from translator import clean_transcript
+            cleaned = await clean_transcript(lines)
+            if cleaned:
+                transcript_clean, corrections = cleaned
+        except Exception as e:
+            log.warning("archive clean failed: %s", e.__class__.__name__)
+
+    # Auto summary + next actions — from the CLEANED transcript when available.
     summary = {}
     try:
         from translator import generate_insight
+        base = transcript_clean or lines
         convo = [f"{('ME' if x.get('stream') in ('me','mic') else 'THEM')}: "
-                 f"{x.get('translation') or x.get('source','')}" for x in lines]
+                 f"{x.get('translation') or x.get('source','')}" for x in base]
         if convo:
             # End-of-session summary digests the WHOLE transcript at once, so it
             # needs a far longer timeout than a live insight refresh — a long
@@ -97,23 +118,12 @@ async def archive_session(meta: dict, day: str, epoch_ms: int,
         log.warning("archive summary failed: %s", e.__class__.__name__)
         summary = {"error": "summary generation failed"}
 
-    # Cleaned transcript: one Bedrock pass that de-fillers, fixes ASR mishears/
-    # punctuation, merges split sentences and lightly repairs nonsense — for BOTH
-    # source and translation. Stored ALONGSIDE the raw transcript (never replacing
-    # it); the dashboard shows cleaned by default with a raw toggle. Best-effort:
-    # on any failure we just omit it and the dashboard falls back to raw.
-    transcript_clean = None
-    if settings.CLEAN_TRANSCRIPT:
-        try:
-            from translator import clean_transcript
-            transcript_clean = await clean_transcript(lines)
-        except Exception as e:
-            log.warning("archive clean failed: %s", e.__class__.__name__)
-
     record = {**meta, "truncated": truncated, "lines": len(lines),
               "transcript": lines, "summary": summary}
     if transcript_clean:
         record["transcript_clean"] = transcript_clean
+    if corrections:
+        record["corrections"] = corrections
     try:
         await asyncio.to_thread(
             _put_sync, key, json.dumps(record, ensure_ascii=False).encode())

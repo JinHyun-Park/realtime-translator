@@ -339,28 +339,42 @@ def _parse_insight_json(text: str, mode: str) -> dict:
 # ---------------------------------------------------------------------------
 
 _CLEAN_SYSTEM = (
-    "You clean up a raw, machine-transcribed bilingual (Korean/Japanese/English) "
-    "conversation transcript so it reads naturally, WITHOUT changing what was said.\n"
+    "You clean up a raw, SPEECH-RECOGNIZED (STT) bilingual (Korean/Japanese/"
+    "English) conversation transcript so it reads naturally, WITHOUT changing "
+    "what was said.\n"
+    "Because the source is STT, errors are similar-SOUNDING words, not typos. "
     "Each input line has an index, a speaker tag (ME or THEM), the raw ASR "
     "'source' text, and its machine 'translation'. Your job, per the cleaned "
     "output:\n"
     "1. Remove filler words and false starts (음, 어, 그, えーと, あの, um, uh, "
     "like) and stutters/repeats.\n"
-    "2. Fix obvious ASR mishearings, punctuation, spacing and casing using "
-    "context. If a phrase is garbled/nonsensical, infer the most likely intended "
-    "meaning from surrounding lines and write that — but NEVER invent facts, "
-    "numbers, names or topics that aren't there.\n"
-    "3. MERGE lines when one sentence was split across consecutive same-speaker "
-    "lines (ASR cut on a breath/pause). Likewise SPLIT a line if it clearly runs "
-    "two sentences together. Keep ME/THEM speaker boundaries intact — never merge "
-    "across speakers.\n"
-    "4. Clean the 'translation' the SAME way and keep it faithful to the cleaned "
-    "source. If you merge/split source lines, merge/split the translation to "
-    "match so they stay paired.\n"
+    "2. HUNT FOR MISHEARD WORDS: read the WHOLE conversation first to learn its "
+    "topic and vocabulary. Then, for every word that doesn't fit its context, ask "
+    "what similar-sounding Korean/Japanese/English word the speaker actually said "
+    "(homophones, particle mishears, foreign loanwords mangled by STT — e.g. "
+    "배포/베포/배표, 결제/결재, デプロイ misheard as similar sounds, cutlass/Kafka) "
+    "and write the intended word. Judge by pronunciation similarity + context "
+    "fit, and NEVER invent facts, numbers, names or topics that aren't there.\n"
+    "3. NORMALIZE TERMS ACROSS THE WHOLE TRANSCRIPT: when the same name, product "
+    "or technical term was recognized differently on different lines, pick the "
+    "most plausible form and use it consistently in every line.\n"
+    "4. Fix punctuation, spacing and casing. MERGE lines when one sentence was "
+    "split across consecutive same-speaker lines (ASR cut on a breath/pause); "
+    "SPLIT a line that clearly runs two sentences together. Never merge across "
+    "speakers.\n"
+    "5. Clean the 'translation' the SAME way, keeping it faithful to the cleaned "
+    "source; merge/split translations to match so pairs stay aligned. If you "
+    "corrected a misheard word in the source, fix its translation too.\n"
     "Do NOT over-formalize: keep the speaker's natural, conversational register. "
     "Do NOT summarize or drop substantive content. Preserve original order.\n"
-    "Output ONLY a single JSON object: {\"lines\": [{\"stream\": \"mic\"|\"sys\", "
-    "\"source\": string, \"translation\": string}, ...]}. No markdown, no prose."
+    "Also report the notable WORD-LEVEL corrections you made (misheard words, "
+    "term normalizations — NOT filler removal or punctuation) as a 'corrections' "
+    "list so the user can audit them: before, after, and a short reason in the "
+    "language of the corrected line.\n"
+    "Output ONLY a single JSON object: {\"lines\": [{\"stream\": \"me\"|\"them\", "
+    "\"source\": string, \"translation\": string}, ...], \"corrections\": "
+    "[{\"before\": string, \"after\": string, \"reason\": string}, ...]}. "
+    "corrections may be empty. No markdown, no prose."
 )
 
 
@@ -388,12 +402,17 @@ def _clean_user_prompt(lines: list[dict]) -> str:
     )
 
 
-async def clean_transcript(lines: list[dict]) -> list[dict] | None:
-    """One Bedrock Claude pass that returns a cleaned copy of `lines`
-    (de-fillered, mishear/punctuation-fixed, split-sentences merged, nonsense
-    lightly repaired) for BOTH source and translation. Returns the cleaned list
-    of {stream, source, translation} dicts, or None on any failure (caller keeps
-    raw-only). Never raises."""
+async def clean_transcript(
+    lines: list[dict],
+) -> tuple[list[dict], list[dict]] | None:
+    """One Bedrock Claude pass over the WHOLE session that returns a cleaned
+    copy of `lines` — de-fillered, punctuation-fixed, split-sentences merged,
+    and STT mishears repaired: similar-sounding wrong words are re-classified
+    to the intended word using full-conversation context, and inconsistently
+    recognized terms are normalized across all lines — for BOTH source and
+    translation. Returns (cleaned_lines, corrections) where corrections is the
+    model's audit list of word-level fixes ({before, after, reason}, possibly
+    empty), or None on any failure (caller keeps raw-only). Never raises."""
     from anthropic import AsyncAnthropicBedrock
 
     real = [x for x in lines if not x.get("truncated")]
@@ -417,7 +436,7 @@ async def clean_transcript(lines: list[dict]) -> list[dict] | None:
     return _parse_clean_json(text)
 
 
-def _parse_clean_json(text: str) -> list[dict] | None:
+def _parse_clean_json(text: str) -> tuple[list[dict], list[dict]] | None:
     s = text.strip()
     if s.startswith("```"):
         s = s.strip("`")
@@ -444,4 +463,14 @@ def _parse_clean_json(text: str) -> list[dict] | None:
             "source": str(r.get("source", "")),
             "translation": str(r.get("translation", "")),
         })
-    return out or None
+    if not out:
+        return None
+    corrections = []
+    for c in (obj.get("corrections") or []):
+        if isinstance(c, dict) and c.get("before") and c.get("after"):
+            corrections.append({
+                "before": str(c["before"]),
+                "after": str(c["after"]),
+                "reason": str(c.get("reason", "")),
+            })
+    return out, corrections
