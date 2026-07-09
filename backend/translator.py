@@ -51,7 +51,7 @@ class Translator:
     # /metrics so we can see if Bedrock is being rate-limited under load.
     bedrock_fallbacks: int = 0
 
-    def __init__(self):
+    def __init__(self, history: collections.deque | None = None):
         self.client = AsyncOpenAI(
             base_url=settings.LLM_BASE_URL, api_key=settings.LLM_API_KEY
         )
@@ -59,8 +59,13 @@ class Translator:
         # switches to the bedrock provider) so the vLLM-only path has no boto3
         # import cost and missing creds don't break startup.
         self._bedrock = None
-        self._history: collections.deque[tuple[str, str]] = collections.deque(
-            maxlen=settings.CONTEXT_WINDOW
+        # Context history: (speaker, source, translation) triples. The server
+        # passes ONE shared deque to both of a room's capture connections (mic +
+        # system audio) so translating THEM can see what ME just said — the two
+        # sides of one conversation were previously invisible to each other.
+        self._history: collections.deque[tuple[str, str, str]] = (
+            history if history is not None
+            else collections.deque(maxlen=settings.CONTEXT_WINDOW)
         )
 
     def _bedrock_client(self):
@@ -87,12 +92,13 @@ class Translator:
     def _context_block(self) -> str:
         if not self._history:
             return ""
-        lines = [f"{s}  ->  {t}" for s, t in self._history]
-        return "Recent context (for consistency only, do not re-translate):\n" + \
-               "\n".join(lines)
+        lines = [f"[{who}] {s}  ->  {t}" for who, s, t in self._history]
+        return ("Recent conversation (both speakers, for consistency only — "
+                "do not re-translate):\n" + "\n".join(lines))
 
     async def translate(
-        self, text: str, src: str, prefer_pair: tuple[str, str], final: bool
+        self, text: str, src: str, prefer_pair: tuple[str, str], final: bool,
+        speaker: str = "?",
     ) -> tuple[str, str]:
         tgt = _target_for(src, prefer_pair)
         if not text.strip():
@@ -123,7 +129,7 @@ class Translator:
 
         # Only finals shape future context (interims are noisy/half-formed).
         if final and out:
-            self._history.append((text, out))
+            self._history.append((speaker, text, out))
         return out, tgt
 
     async def _translate_vllm(self, text, system, ctx, temperature, final):
@@ -171,6 +177,7 @@ class Translator:
                     max_tokens=settings.BEDROCK_MAX_TOKENS,
                     system=system_blocks,
                     messages=[{"role": "user", "content": text}],
+                    temperature=temperature,
                     timeout=settings.LLM_TIMEOUT,
                 )
                 parts = [b.text for b in resp.content if getattr(b, "type", None) == "text"]

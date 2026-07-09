@@ -22,12 +22,17 @@ from config import settings
 ALLOWED_LANGS = {"ko", "ja", "en"}
 
 # Phrases whisper hallucinates on silence/noise (YouTube-outro training bias).
-# Matched case-insensitively after stripping punctuation/whitespace.
-_HALLUCINATION_PHRASES = {
+# Two tiers, matched case-insensitively after stripping punctuation/whitespace:
+#   _OUTRO_PHRASES  — YouTube-speak nobody says in a real meeting; always dropped.
+#   _COMMON_PHRASES — things people REALLY say ("감사합니다", "thank you") that
+#                     whisper ALSO invents on silence. Dropped ONLY when the
+#                     segment's own audio scores look like silence/noise
+#                     (no_speech_prob / avg_logprob "suspect" gate below) — a
+#                     clearly spoken thank-you survives, an invented one dies.
+_OUTRO_PHRASES = {
     # English
     "thank you for watching", "thanks for watching", "thank you for watching!",
-    "please subscribe", "like and subscribe", "see you next time",
-    "thank you", "bye", "you",
+    "please subscribe", "like and subscribe",
     # Japanese
     "ご視聴ありがとうございました", "ご視聴ありがとうございます",
     "視聴ありがとうございました", "視聴していただきありがとうございます",
@@ -35,7 +40,11 @@ _HALLUCINATION_PHRASES = {
     "最後までご視聴いただきありがとうございました",
     # Korean
     "시청해주셔서 감사합니다", "시청해 주셔서 감사합니다",
-    "구독과 좋아요 부탁드립니다", "구독 부탁드립니다", "감사합니다",
+    "구독과 좋아요 부탁드립니다", "구독 부탁드립니다",
+}
+_COMMON_PHRASES = {
+    "thank you", "bye", "you", "see you next time",
+    "감사합니다",
 }
 
 
@@ -43,19 +52,22 @@ def _norm(s: str) -> str:
     return "".join(ch for ch in s.lower() if ch.isalnum() or ch.isspace()).strip()
 
 
-def _is_hallucination(text: str) -> bool:
+_OUTRO_NORM = {_norm(p) for p in _OUTRO_PHRASES}
+_COMMON_NORM = {_norm(p) for p in _COMMON_PHRASES}
+
+
+def _is_hallucination(text: str, suspect: bool = True) -> bool:
+    """True if `text` should be discarded as invented. Outro-speak always dies;
+    real-conversation phrases die only when `suspect` says the audio underneath
+    already looked like silence/noise."""
     if not text:
         return False
     n = _norm(text)
     if not n:
         return True
-    if n in {_norm(p) for p in _HALLUCINATION_PHRASES}:
+    if n in _OUTRO_NORM:
         return True
-    # A short fragment that simply IS one of the canned phrases (no other words).
-    for p in _HALLUCINATION_PHRASES:
-        if n == _norm(p):
-            return True
-    return False
+    return suspect and n in _COMMON_NORM
 
 
 @dataclass
@@ -129,16 +141,24 @@ class Asr:
             temperature=0.0,                  # no sampling fallback into garbage
         )
         # Drop segments whose own scores look like hallucination, then keep text.
+        # "suspect" = this segment's audio already smells like silence/noise
+        # (elevated no-speech probability or weak token confidence) — only then
+        # do we let the common-phrase filter kill a "thank you"/"감사합니다".
         kept = []
+        any_suspect = False
         for s in segments:
-            if getattr(s, "no_speech_prob", 0.0) >= settings.ASR_NO_SPEECH_THRESHOLD:
+            ns = getattr(s, "no_speech_prob", 0.0)
+            if ns >= settings.ASR_NO_SPEECH_THRESHOLD:
                 continue
+            suspect = (ns >= settings.ASR_NO_SPEECH_THRESHOLD * 0.5
+                       or getattr(s, "avg_logprob", 0.0) < settings.ASR_LOGPROB_THRESHOLD * 0.5)
             txt = s.text.strip()
-            if _is_hallucination(txt):
+            if _is_hallucination(txt, suspect=suspect):
                 continue
+            any_suspect = any_suspect or suspect
             kept.append(txt)
         text = " ".join(kept).strip()
-        if _is_hallucination(text):
+        if _is_hallucination(text, suspect=any_suspect):
             text = ""
         lang = info.language if info.language in ALLOWED_LANGS else "ko"
         return AsrResult(text=text, language=lang, avg_logprob=info.language_probability)

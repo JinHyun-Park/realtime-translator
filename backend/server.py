@@ -20,6 +20,7 @@ users transcribe concurrently instead of serializing through one model.
 from __future__ import annotations
 
 import asyncio
+import collections
 import concurrent.futures
 import json
 import logging
@@ -126,6 +127,13 @@ VIEWERS_BY_ROOM: dict[str, set] = {}
 # (stream side me/them, language pair, counts, last-activity timestamp). This is
 # metadata only — no transcript content is kept here.
 CAPTURES_BY_ROOM: dict[str, list] = {}
+
+# Per-room shared translation context. The mic ("me") and system-audio ("them")
+# captures are separate WS connections, but they are two sides of ONE
+# conversation — each side's Translator gets the same deque so pronouns/topic
+# carry across speakers. Sized 2x the per-connection window since two streams
+# feed it. Dropped when the room's last capture leaves.
+CONTEXT_BY_ROOM: dict[str, collections.deque] = {}
 
 
 def _total_viewers() -> int:
@@ -299,7 +307,10 @@ async def _handle(ws):
     room = _ws_room(ws)           # this capture's meeting; its finals go here only
     log.info("client connected: %s room=%s", peer, room)
     seg = Segmenter()
-    tr = Translator()
+    ctx = CONTEXT_BY_ROOM.setdefault(
+        room, collections.deque(maxlen=settings.CONTEXT_WINDOW * 2)
+    )
+    tr = Translator(history=ctx)
     pair: tuple[str, str] = ("ko", "ja")
     stream: str | None = None     # "me" | "them" — set via config, tags broadcasts
     # Register this capture session for operator metrics (metadata only).
@@ -336,7 +347,8 @@ async def _handle(ws):
             if not is_final and ends_sentence(res.text):
                 seg.mark_sentence_complete(ev.seq)
             translation, tgt = await tr.translate(
-                res.text, res.language, pair, final=is_final
+                res.text, res.language, pair, final=is_final,
+                speaker="ME" if stream == "me" else "THEM",
             )
             if is_final:
                 if translation.strip():
@@ -446,6 +458,7 @@ async def _handle(ws):
             caps.remove(cap_info)
             if not caps:
                 CAPTURES_BY_ROOM.pop(room, None)
+                CONTEXT_BY_ROOM.pop(room, None)   # meeting over — drop its context
         log.info("client disconnected: %s room=%s", peer, room)
         # Append this ended session's METADATA (no transcript) to S3 history, so
         # the operator can review past sessions across box restarts. Only log
