@@ -59,6 +59,43 @@ deploy/launch.sh        # golden AMI 자동 사용(빠른 부팅)
 
 ---
 
+## v1.8-accuracy  (커밋 `7caa4ee`)  ← 현재 운영 코드
+**번역 정확도 개선 웨이브 (2026-07-09 ~ 07-10). 서버+앱+뷰어.**
+
+라이브 자막 품질/신뢰성:
+- **interim 미리보기 기아(starvation) 수정**: 긴 문장에서 회색 미리보기가 멈추고
+  final까지 4~5초 공백이 생기던 스케줄링 버그 — 새 틱이 처리 중이던 interim을
+  취소하는 방식을 "최신 pending을 끝까지 처리하는 워커"로 교체. E2E 프로브로
+  재현·검증.
+- **interim은 항상 로컬 vLLM**: Bedrock 왕복(~1.5s)이 interim 주기(1s)보다 길어
+  미리보기가 전멸하던 문제. final/refine만 선택 프로바이더(Claude) 사용.
+- **fast-then-refine** (`RT_REFINE_ENABLED`, 기본 on): final 즉시 표시 후
+  백그라운드에서 대화 맥락으로 재번역 → 개선되면 `refine` 프레임으로 앱/뷰어의
+  해당 줄 제자리 교체. 아카이브에도 반영.
+- **Bedrock temperature 버그**: 전달 누락으로 Claude가 temp 1.0으로 돌던 것 수정
+  (interim 0.0 / final 0.2).
+- **할루시네이션 필터 2단계화**: 유튜브 멘트는 무조건 차단, 실제 회화 문구
+  ("감사합니다"/"thank you")는 오디오가 무음/잡음스러울 때만 차단 — 진짜 인사가
+  증발하던 finals 드롭(22%)의 주범 제거.
+- **ME/THEM 컨텍스트 공유**: 방의 마이크·시스템오디오 연결이 하나의 번역 히스토리
+  공유(화자 태그 포함) + `RT_CONTEXT_WINDOW=6`(공유 12줄).
+
+세션 종료 아카이브:
+- **STT 인지 정리 패스**: 유사발음 오인식 재분류(결제/결재, 카프카/카푸카…),
+  전사 전체 용어 통일, 원문·번역 동시 교정, `corrections` 감사 로그
+  (before/after/사유) 저장. history.html에 교정 내역 표시.
+- **요약이 교정본 사용**: 정리 패스를 요약보다 먼저 실행.
+
+앱 (재빌드 필요 — v1.8 번들):
+- **마이크 AEC**: voice processing 활성화 — 스피커 재생음이 ME로 중복 인식되던
+  문제 해결 (실기기 검증 대기).
+- **refine 프레임 처리**: 확정 자막 제자리 교체.
+- **오디오 엔진 재시작 버튼**: coreaudiod 웨지 시 앱 종료 없이 복구.
+
+복원: `git checkout v1.8-accuracy`
+
+---
+
 ## working-dual-stream-5ff0d95  (커밋 `5ff0d95`)
 초기 듀얼스트림 동작 검증본(롤백 안전점). broadcast/인증 이전.
 
