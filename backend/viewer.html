@@ -101,6 +101,13 @@
     if (stick) window.scrollTo(0, document.body.scrollHeight);
   }
 
+  // Echo dedup: this utterance was the other stream's audio leaking in — its
+  // final was suppressed server-side; remove the orphaned grey interim line.
+  function dedup(m) {
+    var key = (m.stream || "") + ":" + m.seq;
+    if (interimNodes[key]) { interimNodes[key].remove(); delete interimNodes[key]; }
+  }
+
   // Post-final refine: the server re-translated a finalized line with more
   // context — swap the translation in place (no new line, no reflow jump).
   function refine(m) {
@@ -144,6 +151,7 @@
       if (m.type === "final") render(m, true);
       else if (m.type === "interim") render(m, false);
       else if (m.type === "refine") refine(m);
+      else if (m.type === "dedup") dedup(m);
       else if (m.type === "clear") clearLog();
     };
     ws.onclose = function (ev) {

@@ -151,6 +151,17 @@ class Settings:
     # How many previous final sentences to feed as context for coherence.
     CONTEXT_WINDOW = _i("RT_CONTEXT_WINDOW", 3)
 
+    # --- Cross-stream echo dedup ----------------------------------------------
+    # When the meeting plays through SPEAKERS, the far side's voice re-enters
+    # the mic: the same sentence arrives on BOTH streams (system = THEM, then
+    # mic = ME) seconds apart and shows up duplicated. Client-side AEC proved
+    # unusable (voice processing ducks the system output the user needs to
+    # hear). Instead the relay drops a final whose text closely matches a
+    # recent final from the OTHER stream in the same room.
+    DEDUP_ENABLED = _s("RT_DEDUP_ENABLED", "1") == "1"
+    DEDUP_WINDOW_S = _f("RT_DEDUP_WINDOW_S", 7.0)      # echo arrives within this
+    DEDUP_SIMILARITY = _f("RT_DEDUP_SIMILARITY", 0.72) # SequenceMatcher ratio
+
     # --- Post-final refine (fast-then-refine) ---------------------------------
     # After a final subtitle is shown, a background pass re-translates it WITH
     # the recent conversation as context and, if the result is better, pushes a

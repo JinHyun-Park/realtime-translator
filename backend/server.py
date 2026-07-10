@@ -135,6 +135,45 @@ CAPTURES_BY_ROOM: dict[str, list] = {}
 # feed it. Dropped when the room's last capture leaves.
 CONTEXT_BY_ROOM: dict[str, collections.deque] = {}
 
+# Per-room recent finals for cross-stream echo dedup: (ts, stream, norm_text).
+# Speaker playback re-enters the mic, so one sentence lands on both streams a
+# few seconds apart; a new final that closely matches a recent final from the
+# OTHER stream is an echo and gets dropped. Cleared with the room's last capture.
+RECENT_FINALS_BY_ROOM: dict[str, collections.deque] = {}
+
+
+def _dedup_norm(s: str) -> str:
+    # Normalize for fuzzy compare: casefold, strip everything but letters/digits
+    # (drops punctuation AND spaces — robust across KO/JA/EN tokenization).
+    return "".join(ch for ch in s.casefold() if ch.isalnum())
+
+
+def _is_cross_stream_echo(room: str, stream: str, text: str) -> bool:
+    """True if `text` (a new final on `stream`) closely matches a recent final
+    from the OTHER stream in this room — i.e. speaker audio re-captured by the
+    mic (or vice versa). Records this final either way so the other side can
+    match against it later."""
+    import difflib
+    now = _time.time()
+    recents = RECENT_FINALS_BY_ROOM.setdefault(room, collections.deque(maxlen=24))
+    norm = _dedup_norm(text)
+    hit = False
+    if settings.DEDUP_ENABLED and norm:
+        for ts, other_stream, other_norm in recents:
+            if other_stream == stream or now - ts > settings.DEDUP_WINDOW_S:
+                continue
+            if not other_norm:
+                continue
+            ratio = difflib.SequenceMatcher(None, norm, other_norm).ratio()
+            if ratio >= settings.DEDUP_SIMILARITY:
+                hit = True
+                log.info("echo dedup: dropped %s final (%.2f vs %s) '%s'",
+                         stream, ratio, other_stream, text[:40])
+                break
+    if not hit:
+        recents.append((now, stream, norm))
+    return hit
+
 
 def _total_viewers() -> int:
     # Viewers across ALL rooms (for metrics + the idle-stop capture math).
@@ -377,6 +416,17 @@ async def _handle(ws):
             # Lets a long no-pause monologue break per-sentence.
             if not is_final and ends_sentence(res.text):
                 seg.mark_sentence_complete(ev.seq)
+            # Cross-stream echo dedup: with speakers, the far side's voice also
+            # enters the mic — the same sentence would show as THEM and again
+            # as ME. Drop the echo BEFORE spending a translation call on it.
+            # A "dedup" frame tells clients to remove this seq's grey interim
+            # preview (old clients ignore the unknown type; their preview
+            # lingers until the next utterance, same as any dropped final).
+            if is_final and stream and _is_cross_stream_echo(room, stream, res.text):
+                payload = {"type": "dedup", "seq": ev.seq, "stream": stream}
+                await ws.send(json.dumps(payload))
+                await broadcast(payload, room)
+                return
             translation, tgt = await tr.translate(
                 res.text, res.language, pair, final=is_final,
                 speaker="ME" if stream == "me" else "THEM",
@@ -512,6 +562,7 @@ async def _handle(ws):
             if not caps:
                 CAPTURES_BY_ROOM.pop(room, None)
                 CONTEXT_BY_ROOM.pop(room, None)   # meeting over — drop its context
+                RECENT_FINALS_BY_ROOM.pop(room, None)
         log.info("client disconnected: %s room=%s", peer, room)
         # Append this ended session's METADATA (no transcript) to S3 history, so
         # the operator can review past sessions across box restarts. Only log

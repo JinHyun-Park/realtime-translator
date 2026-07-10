@@ -1069,6 +1069,14 @@ final class AppModel: ObservableObject {
             }
             if stream == "mic", micInterim?.id == uid { micInterim = nil }
             if stream == "system", sysInterim?.id == uid { sysInterim = nil }
+        case "dedup":
+            // Echo dedup: this utterance was the other stream's audio leaking
+            // in (speaker -> mic). Its final was suppressed server-side; just
+            // clear the orphaned grey interim so it doesn't linger.
+            guard let seq = msg.seq else { return }
+            let uid = lineID(seq, stream: stream)
+            if stream == "mic", micInterim?.id == uid { micInterim = nil }
+            if stream == "system", sysInterim?.id == uid { sysInterim = nil }
         case "refine":
             // Post-final refine: the server re-translated this line with more
             // conversation context — swap the translation in place. The line
