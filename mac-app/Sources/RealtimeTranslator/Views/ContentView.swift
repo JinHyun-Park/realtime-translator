@@ -79,6 +79,25 @@ struct ControlPanel: View {
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .background(Color.red.opacity(0.85))
                                 .cornerRadius(8)
+                            // One-tap daemon-level recovery: bounce coreaudiod via
+                            // the macOS admin prompt instead of quitting the app.
+                            // Clears a coreaudiod/replayd wedge that in-process
+                            // SCStream restarts can't, keeping the session/transcript.
+                            Button {
+                                model.restartCoreAudio()
+                            } label: {
+                                Label(L10n.t("audio.restartEngine"),
+                                      systemImage: "arrow.clockwise.circle")
+                                    .frame(maxWidth: .infinity)
+                            }
+                            .controlSize(.regular)
+                            .disabled(model.coreAudioRestarting)
+                            Text(L10n.t("audio.restartEngine.help"))
+                                .font(.caption2).foregroundStyle(.secondary)
+                        }
+                        if !model.coreAudioRestartStatus.isEmpty {
+                            Text(model.coreAudioRestartStatus)
+                                .font(.caption2).foregroundStyle(.secondary)
                         }
                         Divider()
                         // Open the broadcast viewer page in the browser — the live
