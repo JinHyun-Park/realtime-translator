@@ -164,6 +164,24 @@ class Settings:
     DEDUP_WINDOW_S = _f("RT_DEDUP_WINDOW_S", 7.0)      # echo arrives within this
     DEDUP_SIMILARITY = _f("RT_DEDUP_SIMILARITY", 0.72) # SequenceMatcher ratio
 
+    # --- Incomplete-sentence hold ----------------------------------------------
+    # A bare pause of MIN_SILENCE_MS cuts a sentence even mid-thought ("저희가
+    # 이번에 검토한 <breath> 방안은..."). When the latest interim text does NOT
+    # look sentence-final, require INCOMPLETE_HOLD x MIN_SILENCE_MS of silence
+    # before the pure-silence trigger fires. Complete-looking sentences still
+    # finalize fast via the punctuation path (PUNCT_SILENCE_MS).
+    INCOMPLETE_HOLD = _f("RT_INCOMPLETE_HOLD", 1.8)
+
+    # --- Live fragment merge (post-hoc sentence repair) -------------------------
+    # When a sentence DOES get cut (pause outlasted the hold, or max-segment
+    # flush), the next final on the same stream arriving within MERGE_WINDOW_S
+    # while the previous final looked incomplete is a continuation: the relay
+    # merges the two lines into one (remove + refine frames), re-translates the
+    # combined sentence in the background, and fixes the archive copy.
+    MERGE_ENABLED = _s("RT_MERGE_ENABLED", "1") == "1"
+    MERGE_WINDOW_S = _f("RT_MERGE_WINDOW_S", 6.0)
+    MERGE_MAX_CHARS = _i("RT_MERGE_MAX_CHARS", 240)   # stop chaining runaway lines
+
     # --- Post-final refine (fast-then-refine) ---------------------------------
     # After a final subtitle is shown, a background pass re-translates it WITH
     # the recent conversation as context and, if the result is better, pushes a

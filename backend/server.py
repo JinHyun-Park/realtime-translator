@@ -363,6 +363,14 @@ async def _handle(ws):
     # memory on a very long meeting; we log if it's hit.
     transcript: list[dict] = []
     TRANSCRIPT_CAP = settings.ARCHIVE_MAX_LINES
+    # Live fragment merge: when a sentence is cut mid-thought (pause outlasted
+    # the incomplete-hold, or max-segment flush), the NEXT final on this stream
+    # arriving shortly after is its continuation. We then translate the
+    # combined text, update the PREVIOUS subtitle line in place (refine frame)
+    # and clear the new fragment's interim (dedup frame) — the viewer sees the
+    # two fragments become one repaired sentence. The archive line is fixed too.
+    last_final: dict | None = None
+
     # Interim scheduling: interims tick every INTERIM_INTERVAL_MS but the
     # pipeline (ASR + translate) can take LONGER than one tick on a long
     # sentence. The old cancel-the-inflight-one policy then starved the screen:
@@ -412,10 +420,14 @@ async def _handle(ws):
                 return
             # Punctuation-aware endpointing: if this INTERIM transcription looks
             # like a completed sentence, tell the segmenter so it finalizes early
-            # (after a tiny pause) instead of waiting out MIN_SILENCE/MAX_SEGMENT.
-            # Lets a long no-pause monologue break per-sentence.
-            if not is_final and ends_sentence(res.text):
-                seg.mark_sentence_complete(ev.seq)
+            # (after a tiny pause). If it does NOT, tell it that too — the
+            # silence trigger then holds LONGER (incomplete_hold) so a breath
+            # mid-thought doesn't split the sentence.
+            if not is_final:
+                if ends_sentence(res.text):
+                    seg.mark_sentence_complete(ev.seq)
+                else:
+                    seg.mark_sentence_incomplete(ev.seq)
             # Cross-stream echo dedup: with speakers, the far side's voice also
             # enters the mic — the same sentence would show as THEM and again
             # as ME. Drop the echo BEFORE spending a translation call on it.
@@ -427,10 +439,44 @@ async def _handle(ws):
                 await ws.send(json.dumps(payload))
                 await broadcast(payload, room)
                 return
+            # Live fragment merge: this final continues a mid-thought cut?
+            nonlocal last_final
+            merge_from = None
+            if (is_final and settings.MERGE_ENABLED and last_final is not None
+                    and _time.time() - last_final["ts"] <= settings.MERGE_WINDOW_S
+                    and not ends_sentence(last_final["source"])
+                    and last_final["src"] == res.language
+                    and len(last_final["source"]) + len(res.text) <= settings.MERGE_MAX_CHARS):
+                merge_from = last_final
+            full_text = (merge_from["source"] + " " + res.text) if merge_from else res.text
+
             translation, tgt = await tr.translate(
-                res.text, res.language, pair, final=is_final,
+                full_text, res.language, pair, final=is_final,
                 speaker="ME" if stream == "me" else "THEM",
             )
+            if is_final and merge_from and translation.strip():
+                # Repair on screen: the PREVIOUS line absorbs the fragment
+                # (refine frame carries the merged sentence), and this seq's
+                # grey interim disappears (dedup frame). No new line is added.
+                upd = {"type": "refine", "seq": merge_from["seq"],
+                       "src": res.language, "tgt": tgt, "source": full_text,
+                       "translation": translation, "stream": stream}
+                drop = {"type": "dedup", "seq": ev.seq, "stream": stream}
+                await ws.send(json.dumps(upd)); await broadcast(upd, room)
+                await ws.send(json.dumps(drop)); await broadcast(drop, room)
+                # Fix the archive line in place (same dict object).
+                if merge_from["line_ref"] is not None:
+                    merge_from["line_ref"]["source"] = full_text
+                    merge_from["line_ref"]["translation"] = translation
+                cap_info["last_ts"] = _time.time()
+                # The merged line may STILL be incomplete (another fragment can
+                # follow) — keep it as the merge candidate with the running text.
+                last_final = {**merge_from, "source": full_text, "ts": _time.time()}
+                if settings.REFINE_ENABLED:
+                    asyncio.create_task(refine_later(
+                        merge_from["seq"], full_text, translation, res.language,
+                        tgt, merge_from["line_ref"]))
+                return
             if is_final:
                 if translation.strip():
                     METRICS["finals_total"] += 1
@@ -447,6 +493,10 @@ async def _handle(ws):
                         transcript.append(line_ref)
                     elif len(transcript) == TRANSCRIPT_CAP:
                         transcript.append({"truncated": True})  # marker; logged below
+                    # Remember as the merge candidate for a possible continuation.
+                    last_final = {"seq": ev.seq, "source": res.text,
+                                  "src": res.language, "ts": _time.time(),
+                                  "line_ref": line_ref}
                     # Fast-then-refine: show this translation NOW, then improve
                     # it in the background with conversation context.
                     if settings.REFINE_ENABLED:
@@ -882,6 +932,12 @@ async def _serve_http(port: int = 9000):
                         ENDPOINT["punct_enabled"] = (qs["punct"][0] not in ("0", "false", "False"))
                     if "en_gate" in qs:
                         ENDPOINT["en_sentence_gate"] = (qs["en_gate"][0] not in ("0", "false", "False"))
+                    if "hold" in qs:
+                        # incomplete-sentence hold multiplier (1.0..4.0)
+                        try:
+                            ENDPOINT["incomplete_hold"] = max(1.0, min(4.0, float(qs["hold"][0])))
+                        except ValueError:
+                            pass
                     log.info("control/endpoint -> %s", ENDPOINT)
                     body = json.dumps({"ok": True, **ENDPOINT}).encode()
                 else:  # /control/idle

@@ -1115,15 +1115,17 @@ final class AppModel: ObservableObject {
             if stream == "mic", micInterim?.id == uid { micInterim = nil }
             if stream == "system", sysInterim?.id == uid { sysInterim = nil }
         case "refine":
-            // Post-final refine: the server re-translated this line with more
-            // conversation context — swap the translation in place. The line
-            // was already autosaved with the fast translation; the on-disk
-            // file keeps it (the S3 archive gets the refined text server-side).
+            // Post-final refine OR live fragment merge: the server improved
+            // this line (better translation, possibly with the source text
+            // extended by a merged continuation) — swap both in place. The
+            // line was already autosaved with the fast text; the on-disk file
+            // keeps it (the S3 archive gets the repaired text server-side).
             guard let seq = msg.seq else { return }
             let uid = lineID(seq, stream: stream)
             if let idx = lines.firstIndex(where: { $0.id == uid }) {
                 var l = lines[idx]
                 l.translation = msg.translation ?? l.translation
+                if let src = msg.source, !src.isEmpty { l.source = src }
                 lines[idx] = l
             }
         default:

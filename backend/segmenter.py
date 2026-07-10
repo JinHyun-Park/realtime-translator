@@ -35,6 +35,11 @@ ENDPOINT = {
     "punct_enabled": settings.PUNCT_ENDPOINT_ENABLED,
     "punct_silence_ms": settings.PUNCT_SILENCE_MS,
     "en_sentence_gate": settings.EN_SENTENCE_GATE,
+    # Multiplier on min_silence_ms when the latest interim text does NOT look
+    # sentence-final: a breath mid-thought ("저희가 검토한 <pause> 방안은...")
+    # must outlast a LONGER hold before pure silence cuts the sentence.
+    # Complete-looking sentences still finalize fast via the punctuation path.
+    "incomplete_hold": settings.INCOMPLETE_HOLD,
 }
 
 # Sentence-final punctuation Whisper emits when it judges an utterance complete
@@ -122,6 +127,13 @@ class Segmenter:
         if seq == self._seq and self._triggered:
             self._sentence_complete = True
 
+    def mark_sentence_incomplete(self, seq: int):
+        """Server feedback: the latest interim for `seq` does NOT look like a
+        finished sentence — the speaker paused mid-thought. The silence trigger
+        then waits longer (incomplete_hold x min_silence) before cutting."""
+        if seq == self._seq and self._triggered:
+            self._sentence_complete = False
+
     def add_audio(self, chunk: bytes) -> list[SegEvent]:
         """Feed arbitrary-length PCM16 bytes; get back 0+ segment events."""
         events: list[SegEvent] = []
@@ -192,7 +204,13 @@ class Segmenter:
         #    interim ended a sentence; we just need a brief breath to confirm it
         #    wasn't a mid-word whisper misfire). This is what lets a 1-2 min
         #    monologue finalize per-sentence instead of waiting out the pause.
-        long_pause = self._silence_ms >= ENDPOINT["min_silence_ms"]
+        # Incomplete-sentence hold: if the latest interim text did NOT look
+        # sentence-final, a bare pause must last LONGER (hold x min_silence)
+        # before it cuts — a mid-thought breath ("저희가 검토한 <숨> 방안은")
+        # no longer splits the sentence. Sentence-final text keeps the normal
+        # threshold, and the punctuation path below finalizes even faster.
+        hold = 1.0 if self._sentence_complete else max(1.0, ENDPOINT["incomplete_hold"])
+        long_pause = self._silence_ms >= ENDPOINT["min_silence_ms"] * hold
         too_long = self._seg_ms >= ENDPOINT["max_segment_ms"]
         punct_end = (ENDPOINT["punct_enabled"] and self._sentence_complete
                      and self._silence_ms >= ENDPOINT["punct_silence_ms"])
