@@ -305,6 +305,14 @@ final class AppModel: ObservableObject {
         (UserDefaults.standard.object(forKey: "captureMic") as? Bool ?? true) {
         didSet { UserDefaults.standard.set(captureMic, forKey: "captureMic") }
     }
+    // Mic echo cancellation (AEC) — for SPEAKER users whose meeting audio leaks
+    // back into the mic and shows up duplicated as ME. OFF by default: voice
+    // processing on an input-only engine can yield silent buffers on some
+    // device combos, which looks like "my mic stopped working".
+    @Published var micAEC: Bool =
+        (UserDefaults.standard.object(forKey: "micAEC") as? Bool ?? false) {
+        didSet { UserDefaults.standard.set(micAEC, forKey: "micAEC") }
+    }
     @Published var inputDevices: [AudioDevice] = []
     @Published var outputDevices: [AudioDevice] = []
     // Selected audio devices, persisted by device UID-ish ID. NOTE: AudioDeviceID
@@ -846,6 +854,7 @@ final class AppModel: ObservableObject {
         // the main actor to update status. The onSamples closure just forwards
         // audio (thread-safe counters/WS send), so it's fine off-main.
         let selected = selectedInputID
+        let aec = micAEC
         let begin: () -> Void = { [weak self] in
             guard let self else { return }
             self.mic.onSamples = { [weak self] s in
@@ -855,7 +864,7 @@ final class AppModel: ObservableObject {
             }
             // MicCapture.startAsync runs the blocking AVAudioEngine work on its
             // OWN private queue (never the main thread) and calls back on error.
-            self.mic.startAsync(device: selected) { msg in
+            self.mic.startAsync(device: selected, aec: aec) { msg in
                 if let msg { Task { @MainActor in self.status = "Mic error: \(msg)" } }
             }
         }

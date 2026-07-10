@@ -18,13 +18,18 @@ final class MicCapture {
 
     /// Start on the private queue. `onError` is called (on that queue) with nil
     /// on success or a message on failure — callers hop to the main actor.
-    func startAsync(device: AudioDeviceID?, onError: @escaping (String?) -> Void) {
+    /// `aec`: enable macOS voice processing (echo cancellation). OFF by default
+    /// — on engines like ours with no output path, voice processing can deliver
+    /// all-zero input buffers on some device combos (mic looks alive, hears
+    /// nothing). Users who meet the speaker-echo problem opt in via the UI.
+    func startAsync(device: AudioDeviceID?, aec: Bool,
+                    onError: @escaping (String?) -> Void) {
         q.async { [weak self] in
             guard let self else { return }
             do {
                 try self.setInputDeviceLocked(device)
-                try self.startLocked()
-                rtlog("mic.start() OK device=\(String(describing: device))")
+                try self.startLocked(aec: aec)
+                rtlog("mic.start() OK device=\(String(describing: device)) aec=\(aec)")
                 onError(nil)
             } catch {
                 rtlog("mic.start() FAILED: \(error.localizedDescription)")
@@ -54,20 +59,28 @@ final class MicCapture {
         }
     }
 
-    private func startLocked() throws {
+    private func startLocked(aec: Bool) throws {
         let input = engine.inputNode
-        // Acoustic echo cancellation: when the meeting plays through SPEAKERS,
-        // the other side's voice re-enters this mic and gets transcribed as ME
-        // duplicating THEM. Apple's voice processing subtracts the system
-        // output from the mic signal (same tech as FaceTime). Must be set
-        // BEFORE reading the format/installing the tap — it changes the node's
-        // I/O format. Best-effort: if the device/OS refuses, capture stays raw
-        // (headphone users lose nothing either way).
-        do {
-            try input.setVoiceProcessingEnabled(true)
-            rtlog("mic AEC (voice processing) enabled")
-        } catch {
-            rtlog("mic AEC unavailable, capturing raw: \(error.localizedDescription)")
+        // Acoustic echo cancellation (OPT-IN): when the meeting plays through
+        // SPEAKERS, the other side's voice re-enters this mic and gets
+        // transcribed as ME duplicating THEM. Apple's voice processing
+        // subtracts the system output from the mic signal (same tech as
+        // FaceTime). Must be set BEFORE reading the format/installing the tap
+        // — it changes the node's I/O format. Caveat: on an input-only engine
+        // some device combos deliver silent (all-zero) buffers with voice
+        // processing on — hence opt-in rather than default.
+        if aec {
+            do {
+                try input.setVoiceProcessingEnabled(true)
+                rtlog("mic AEC (voice processing) enabled")
+            } catch {
+                rtlog("mic AEC unavailable, capturing raw: \(error.localizedDescription)")
+            }
+        } else if input.isVoiceProcessingEnabled {
+            // A previous AEC run leaves voice processing latched on the node;
+            // turn it back off so plain capture is truly plain.
+            try? input.setVoiceProcessingEnabled(false)
+            rtlog("mic AEC disabled (raw capture)")
         }
         let format = input.inputFormat(forBus: 0)
         guard format.sampleRate > 0 else {

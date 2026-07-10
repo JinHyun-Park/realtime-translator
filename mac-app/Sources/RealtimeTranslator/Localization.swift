@@ -96,6 +96,8 @@ enum L10n {
         "st.viewersCleared": [.ko: "뷰어 화면 비움 완료", .ja: "ビューア画面をクリアしました", .en: "Viewers cleared"],
         "warn.sysAudioReconnecting": [.ko: "⚠️ 시스템 오디오 끊김 — 재연결 중… (%d)", .ja: "⚠️ システム音声が途切れました — 再接続中… (%d)", .en: "⚠️ System audio dropped — reconnecting… (%d)"],
         "warn.sysAudioDead": [.ko: "⚠️ 시스템 오디오 복구 실패 — 아래 ‘오디오 엔진 재시작’을 누르거나 앱을 완전히 종료(⌘Q) 후 다시 켜주세요", .ja: "⚠️ システム音声の復旧に失敗 — 下の「オーディオエンジンを再起動」を押すか、アプリを完全に終了（⌘Q）して再起動してください", .en: "⚠️ System audio recovery failed — tap ‘Restart audio engine’ below, or quit the app (⌘Q) and reopen it"],
+        "audio.aec": [.ko: "에코 제거 (스피커 사용 시)", .ja: "エコー除去（スピーカー使用時）", .en: "Echo cancellation (speakers)"],
+        "audio.aec.help": [.ko: "스피커 소리가 마이크로 다시 들어가 ME로 중복 표시될 때 켜세요. 일부 장치에선 마이크가 무음이 될 수 있음 — 그땐 끄세요.", .ja: "スピーカーの音がマイクに回り込みMEとして重複表示される場合にオン。一部のデバイスではマイクが無音になることがあります — その場合はオフに。", .en: "Turn on if speaker audio re-enters the mic and shows up duplicated as ME. On some devices the mic may go silent — turn it off if so."],
         "audio.restartEngine": [.ko: "오디오 엔진 재시작", .ja: "オーディオエンジンを再起動", .en: "Restart audio engine"],
         "audio.restartEngine.help": [.ko: "시스템 오디오 데몬(coreaudiod)을 재시작해 멈춘 캡처를 복구합니다. 관리자 암호가 필요하며 소리가 1초 정도 끊깁니다.", .ja: "システム音声デーモン（coreaudiod）を再起動して停止したキャプチャを復旧します。管理者パスワードが必要で、音声が1秒ほど途切れます。", .en: "Restarts the system-audio daemon (coreaudiod) to recover a stalled capture. Needs your admin password; audio blips for ~1s."],
         "st.coreAudioRestarting": [.ko: "오디오 데몬 재시작 중…", .ja: "オーディオデーモンを再起動中…", .en: "Restarting audio daemon…"],

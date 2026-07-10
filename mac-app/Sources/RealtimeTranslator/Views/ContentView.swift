@@ -231,6 +231,11 @@ struct ControlPanel: View {
                             .disabled(model.running)
                         Toggle("Microphone / input", isOn: $model.captureMic)
                             .disabled(model.running)
+                        Toggle(L10n.t("audio.aec"), isOn: $model.micAEC)
+                            .disabled(model.running || !model.captureMic)
+                        Text(L10n.t("audio.aec.help"))
+                            .font(.caption2).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
 
                         Text("Input device")
                             .font(.caption).foregroundStyle(.secondary)
