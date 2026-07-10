@@ -879,12 +879,15 @@ final class AppModel: ObservableObject {
             self.mic.onSamples = { [weak self] s in
                 guard let self else { return }
                 self.micFlow.add(s.count)
-                // Echo gate: drop mic chunks that are the speakers' sound
-                // re-entering the mic. Suppressed audio is replaced by silence
-                // (not skipped) so the relay's VAD sees continuous time and
-                // closes any open utterance naturally.
-                if gateOn, self.echoGate.pushMic(s) {
-                    self.micClient.sendAudio(floatsToPCM16([Float](repeating: 0, count: s.count)))
+                // Echo gate: mic audio flows through a 500ms lookahead FIFO;
+                // chunks identified as speaker echo are zeroed (retroactively
+                // across the same utterance) before release, so the relay's
+                // VAD sees continuous time but never hears the leak. Costs
+                // 500ms of extra ME subtitle latency when the gate is on.
+                if gateOn {
+                    if let out = self.echoGate.processMic(s) {
+                        self.micClient.sendAudio(floatsToPCM16(out))
+                    }
                     return
                 }
                 self.micClient.sendAudio(floatsToPCM16(s))
@@ -940,6 +943,12 @@ final class AppModel: ObservableObject {
     func stop() {
         wakeTask?.cancel(); wakeTask = nil
         dbgTimer?.invalidate(); dbgTimer = nil
+        // Flush the echo gate's 500ms lookahead so the tail of the user's last
+        // sentence still reaches the relay before the sockets close.
+        if echoGateEnabled {
+            let tail = echoGate.drain()
+            if !tail.isEmpty { micClient.sendAudio(floatsToPCM16(tail)) }
+        }
         // Stop audio off the main thread too — engine teardown touches the same
         // HAL queue that can block. MicCapture.stopAsync uses its own queue;
         // system capture stop is already async-safe.
