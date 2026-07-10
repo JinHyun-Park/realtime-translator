@@ -324,8 +324,15 @@ async def _handle(ws):
     # memory on a very long meeting; we log if it's hit.
     transcript: list[dict] = []
     TRANSCRIPT_CAP = settings.ARCHIVE_MAX_LINES
-    # Drop stale interim work if a newer one for the same seq arrives.
-    interim_tasks: dict[int, asyncio.Task] = {}
+    # Interim scheduling: interims tick every INTERIM_INTERVAL_MS but the
+    # pipeline (ASR + translate) can take LONGER than one tick on a long
+    # sentence. The old cancel-the-inflight-one policy then starved the screen:
+    # every interim was cancelled by the next tick and the grey preview froze
+    # mid-sentence. Instead run ONE worker per seq that always processes the
+    # LATEST pending event to completion — the preview updates at the
+    # pipeline's natural rate and never starves.
+    interim_pending: dict[int, object] = {}    # seq -> latest unprocessed event
+    interim_workers: dict[int, asyncio.Task] = {}
 
     await ws.send(json.dumps({"type": "ready"}))
 
@@ -426,17 +433,31 @@ async def _handle(ws):
             except Exception:
                 pass
 
+    async def interim_worker(seq: int):
+        # Drain the latest pending interim for this seq until none remain.
+        # Each iteration processes ONE event fully (ASR + translate + send);
+        # ticks that arrived meanwhile just overwrite interim_pending[seq],
+        # so we always work on the freshest audio and skip stale ones.
+        while True:
+            ev = interim_pending.pop(seq, None)
+            if ev is None:
+                interim_workers.pop(seq, None)
+                return
+            await process(ev, False)
+
     async def dispatch(events):
         for ev in events:
             if ev.kind == "interim":
-                old = interim_tasks.get(ev.seq)
-                if old and not old.done():
-                    old.cancel()
-                interim_tasks[ev.seq] = asyncio.create_task(process(ev, False))
+                interim_pending[ev.seq] = ev
+                w = interim_workers.get(ev.seq)
+                if w is None or w.done():
+                    interim_workers[ev.seq] = asyncio.create_task(
+                        interim_worker(ev.seq))
             else:  # final
-                old = interim_tasks.pop(ev.seq, None)
-                if old and not old.done():
-                    old.cancel()
+                interim_pending.pop(ev.seq, None)
+                w = interim_workers.pop(ev.seq, None)
+                if w and not w.done():
+                    w.cancel()
                 # Finals are awaited in order so context history stays coherent.
                 await process(ev, True)
 
