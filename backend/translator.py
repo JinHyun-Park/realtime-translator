@@ -111,10 +111,15 @@ class Translator:
         # synonyms on every refresh. Finals keep the configured temperature.
         temperature = 0.0 if not final else settings.LLM_TEMPERATURE
 
-        # Route by the live provider switch. Bedrock (Claude) is higher accuracy;
-        # on a throttle/error we fall back to the local Qwen for THIS call so a
+        # Route by the live provider switch. Bedrock (Claude) is higher accuracy
+        # but its round-trip (~1.5s) is LONGER than the interim refresh interval
+        # (1s) — an interim translated via Bedrock is cancelled by the next tick
+        # before it ever reaches the screen, so the grey "listening" preview
+        # disappears entirely. Interims therefore ALWAYS use the local vLLM
+        # (fast, free); finals and the refine pass use the selected provider.
+        # On a Bedrock throttle/error we fall back to Qwen for THIS call so a
         # rate limit never blanks the subtitle mid-meeting.
-        if LLM["provider"] == "bedrock":
+        if LLM["provider"] == "bedrock" and final:
             out = await self._translate_bedrock(text, system, ctx, temperature, final)
             if out is None:                       # bedrock failed — fall back
                 Translator.bedrock_fallbacks += 1
