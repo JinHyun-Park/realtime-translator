@@ -56,6 +56,19 @@ final class MicCapture {
 
     private func startLocked() throws {
         let input = engine.inputNode
+        // Acoustic echo cancellation: when the meeting plays through SPEAKERS,
+        // the other side's voice re-enters this mic and gets transcribed as ME
+        // duplicating THEM. Apple's voice processing subtracts the system
+        // output from the mic signal (same tech as FaceTime). Must be set
+        // BEFORE reading the format/installing the tap — it changes the node's
+        // I/O format. Best-effort: if the device/OS refuses, capture stays raw
+        // (headphone users lose nothing either way).
+        do {
+            try input.setVoiceProcessingEnabled(true)
+            rtlog("mic AEC (voice processing) enabled")
+        } catch {
+            rtlog("mic AEC unavailable, capturing raw: \(error.localizedDescription)")
+        }
         let format = input.inputFormat(forBus: 0)
         guard format.sampleRate > 0 else {
             throw NSError(domain: "rt.mic", code: 2,

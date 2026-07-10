@@ -132,6 +132,51 @@ class Translator:
             self._history.append((speaker, text, out))
         return out, tgt
 
+    async def refine(self, text: str, fast: str, src: str, tgt: str,
+                     speaker: str = "?") -> str | None:
+        """Post-final refine pass (fast-then-refine). The quick per-utterance
+        translation `fast` is already on screen; this re-examines it WITH the
+        recent conversation and returns a better translation, or None when the
+        fast one is already fine / on any failure (caller then leaves the
+        subtitle untouched). One attempt, temperature 0, never raises."""
+        system = (
+            f"You are reviewing one line of live subtitle translation from "
+            f"{LANG_NAME.get(src, src)} into {LANG_NAME.get(tgt, tgt)}.\n"
+            "The line was translated in real time WITHOUT the surrounding "
+            "conversation, so it may misread context: a wrong pronoun or "
+            "honorific, a term translated inconsistently with earlier lines, or "
+            "an awkward rendering of a sentence fragment.\n"
+            "Rules:\n"
+            "- If the current translation is already accurate and natural, "
+            "output it EXACTLY as given, unchanged.\n"
+            "- Otherwise output ONLY the corrected translation. No quotes, no "
+            "notes, no explanations.\n"
+            "- The source text is speech-recognized; if a word is clearly a "
+            "mishearing of a similar-sounding word, translate the intended "
+            "word.\n"
+            "- Never add content that is not in the source."
+        )
+        ctx = self._context_block()
+        user = (f"Line spoken by [{speaker}]: {text}\n"
+                f"Current translation: {fast}")
+        if LLM["provider"] == "bedrock":
+            out = await self._translate_bedrock(user, system, ctx, 0.0, False)
+        else:
+            out = await self._translate_vllm(user, system, ctx, 0.0, False)
+        if not out:
+            return None
+        out = out.strip()
+        if not out or out == fast.strip():
+            return None
+        # Refined result replaces the fast one in the shared context too, so
+        # later lines build on the corrected phrasing.
+        for i in range(len(self._history) - 1, -1, -1):
+            who, s, t = self._history[i]
+            if s == text and t == fast:
+                self._history[i] = (who, s, out)
+                break
+        return out
+
     async def _translate_vllm(self, text, system, ctx, temperature, final):
         """Local Qwen via the OpenAI-compatible vLLM/Ollama endpoint.
         Returns the translation string, or None on hard failure."""

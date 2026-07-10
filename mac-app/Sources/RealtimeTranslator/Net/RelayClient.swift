@@ -2,7 +2,7 @@ import Foundation
 
 /// Server -> client message.
 struct RelayMessage: Decodable {
-    let type: String          // "ready" | "interim" | "final" | "error"
+    let type: String          // "ready" | "interim" | "final" | "refine" | "error"
     let seq: Int?
     let src: String?
     let tgt: String?

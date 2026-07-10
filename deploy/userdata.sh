@@ -112,6 +112,9 @@ Environment=RT_LLM_BASE_URL=http://127.0.0.1:8000/v1
 Environment=RT_LLM_MODEL=Qwen/Qwen3-32B-AWQ
 Environment=RT_MIN_SILENCE_MS=1000
 Environment=RT_MAX_SEGMENT_MS=15000
+# 6 previous finals as translation context (shared deque is 2x = 12 lines,
+# both speakers) — pronouns/terms stay coherent across a longer stretch.
+Environment=RT_CONTEXT_WINDOW=6
 Environment=RT_HOST=0.0.0.0
 Environment=RT_PORT=8765
 Environment=RT_RELAY_TOKEN=__RELAY_TOKEN__

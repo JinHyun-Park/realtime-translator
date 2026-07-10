@@ -928,6 +928,83 @@ final class AppModel: ObservableObject {
         if running { micClient.setPair(langA, langB); sysClient.setPair(langB, langA) }
     }
 
+    // MARK: - Core Audio daemon restart (last-resort recovery)
+    // When the watchdog exhausts in-process restarts (warn.sysAudioDead), the
+    // stall is a coreaudiod/replayd wedge that a same-process SCStream restart
+    // can't clear — historically the only fix was relaunching the app (⌘Q). But
+    // bouncing the audio daemon (`killall coreaudiod`; launchd relaunches it in
+    // ~1s) clears the wedge WITHOUT losing the transcript or the session. That
+    // needs admin rights, so we ask via macOS's standard auth prompt (osascript
+    // "with administrator privileges") — no sudoers edit, no baked-in password.
+    @Published var coreAudioRestartStatus = ""
+    @Published var coreAudioRestarting = false
+
+    /// Bounce coreaudiod (admin prompt), then re-arm system-audio capture. Safe:
+    /// launchd immediately respawns the daemon; only in-flight audio blips ~1s.
+    func restartCoreAudio() {
+        guard !coreAudioRestarting else { return }
+        coreAudioRestarting = true
+        coreAudioRestartStatus = L10n.t("st.coreAudioRestarting")
+        rtlog("restartCoreAudio: requesting admin kill of coreaudiod")
+        // Run the privileged kill off-main (the auth dialog + process spawn block).
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let ok = Self.killCoreAudioWithAuth()
+            Task { @MainActor in
+                guard let self else { return }
+                if ok {
+                    self.coreAudioRestartStatus = L10n.t("st.coreAudioRestarted")
+                    rtlog("restartCoreAudio: daemon bounced OK")
+                    // Give launchd a moment to respawn coreaudiod, then re-enumerate
+                    // devices and, if we were capturing, restart system audio so the
+                    // user is back to a live stream without touching anything.
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                        self.refreshDevices()
+                        if self.running, self.captureSystemAudio, #available(macOS 13.0, *) {
+                            self.sysRestartAttempts = 0
+                            self.audioWarning = ""
+                            self.restartSystemAudio()
+                        }
+                        self.coreAudioRestarting = false
+                        // Clear the status line after a few seconds.
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
+                            self.coreAudioRestartStatus = ""
+                        }
+                    }
+                } else {
+                    self.coreAudioRestartStatus = L10n.t("st.coreAudioRestartFailed")
+                    self.coreAudioRestarting = false
+                    rtlog("restartCoreAudio: failed or cancelled")
+                }
+            }
+        }
+    }
+
+    /// Kill coreaudiod via an admin-authenticated AppleScript shell call. Returns
+    /// true on success. The prompt is macOS's own (Touch ID / password); if the
+    /// user cancels, osascript exits non-zero and we report failure.
+    private nonisolated static func killCoreAudioWithAuth() -> Bool {
+        let script = "do shell script \"/usr/bin/killall coreaudiod\" with administrator privileges"
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        proc.arguments = ["-e", script]
+        let errPipe = Pipe()
+        proc.standardError = errPipe
+        do {
+            try proc.run()
+            proc.waitUntilExit()
+            if proc.terminationStatus != 0 {
+                let err = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(),
+                                 encoding: .utf8) ?? ""
+                rtlog("killCoreAudioWithAuth non-zero: \(err.prefix(200))")
+                return false
+            }
+            return true
+        } catch {
+            rtlog("killCoreAudioWithAuth threw: \(error.localizedDescription)")
+            return false
+        }
+    }
+
     // MARK: - Relay messages
 
     /// Map a per-connection relay seq to a globally-unique line id. The two
@@ -983,6 +1060,18 @@ final class AppModel: ObservableObject {
             }
             if stream == "mic", micInterim?.id == uid { micInterim = nil }
             if stream == "system", sysInterim?.id == uid { sysInterim = nil }
+        case "refine":
+            // Post-final refine: the server re-translated this line with more
+            // conversation context — swap the translation in place. The line
+            // was already autosaved with the fast translation; the on-disk
+            // file keeps it (the S3 archive gets the refined text server-side).
+            guard let seq = msg.seq else { return }
+            let uid = lineID(seq, stream: stream)
+            if let idx = lines.firstIndex(where: { $0.id == uid }) {
+                var l = lines[idx]
+                l.translation = msg.translation ?? l.translation
+                lines[idx] = l
+            }
         default:
             break
         }

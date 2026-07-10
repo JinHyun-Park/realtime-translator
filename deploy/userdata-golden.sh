@@ -131,6 +131,8 @@ set_env RT_ASR_NUM_GPUS "$ASR_GPUS"
 set_env RT_RELAY_TOKEN "$RELAY_TOKEN"
 # Idle auto-stop OFF: shared always-on box (see userdata.sh for the rationale).
 set_env RT_IDLE_STOP_ENABLED "0"
+# Wider translation context (see userdata.sh).
+set_env RT_CONTEXT_WINDOW "6"
 sed -i "s|Environment=CUDA_VISIBLE_DEVICES=.*|Environment=CUDA_VISIBLE_DEVICES=$ASR_CUDA|" \
   /etc/systemd/system/rt-relay.service
 

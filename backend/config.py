@@ -151,6 +151,14 @@ class Settings:
     # How many previous final sentences to feed as context for coherence.
     CONTEXT_WINDOW = _i("RT_CONTEXT_WINDOW", 3)
 
+    # --- Post-final refine (fast-then-refine) ---------------------------------
+    # After a final subtitle is shown, a background pass re-translates it WITH
+    # the recent conversation as context and, if the result is better, pushes a
+    # replacement for that line (same seq -> app/viewer swap it in place). The
+    # user sees the fast translation instantly and the refined one ~1-2s later.
+    # Costs one extra LLM call per final. "0" disables.
+    REFINE_ENABLED = _s("RT_REFINE_ENABLED", "1") == "1"
+
     # --- Translation provider switch: "vllm" (local Qwen) | "bedrock" (Claude) ---
     # The app flips this live via /control/llm. "bedrock" routes translation to
     # Claude Sonnet 4.6 on Amazon Bedrock (higher accuracy); "vllm" uses the local

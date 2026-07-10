@@ -329,6 +329,30 @@ async def _handle(ws):
 
     await ws.send(json.dumps({"type": "ready"}))
 
+    async def refine_later(seq: int, text: str, fast: str, res_lang: str,
+                           tgt: str, line_ref: dict | None):
+        """Fast-then-refine: the quick translation is already on screen; this
+        re-translates with conversation context and pushes a same-seq "refine"
+        frame so the app/viewer swap the line in place. Best-effort — any
+        failure just leaves the fast subtitle as-is."""
+        try:
+            better = await tr.refine(text, fast, res_lang, tgt,
+                                     speaker="ME" if stream == "me" else "THEM")
+            if not better:
+                return
+            if line_ref is not None:       # archive gets the refined text too
+                line_ref["translation"] = better
+            payload = {
+                "type": "refine", "seq": seq, "src": res_lang, "tgt": tgt,
+                "source": text, "translation": better, "stream": stream,
+            }
+            await ws.send(json.dumps(payload))
+            await broadcast(payload, room)
+        except websockets.ConnectionClosed:
+            pass
+        except Exception:
+            log.exception("refine error (subtitle keeps fast translation)")
+
     async def process(ev, is_final: bool):
         t0 = _time.time()
         try:
@@ -356,14 +380,22 @@ async def _handle(ws):
                     cap_info["finals"] += 1            # operator metric counter
                     cap_info["last_ts"] = _time.time()  # room activity timestamp
                     # Accumulate the bilingual line for the end-of-session archive.
+                    line_ref = None
                     if len(transcript) < TRANSCRIPT_CAP:
-                        transcript.append({
+                        line_ref = {
                             "ts": int(_time.time() * 1000),
                             "stream": stream, "src": res.language, "tgt": tgt,
                             "source": res.text, "translation": translation,
-                        })
+                        }
+                        transcript.append(line_ref)
                     elif len(transcript) == TRANSCRIPT_CAP:
                         transcript.append({"truncated": True})  # marker; logged below
+                    # Fast-then-refine: show this translation NOW, then improve
+                    # it in the background with conversation context.
+                    if settings.REFINE_ENABLED:
+                        asyncio.create_task(refine_later(
+                            ev.seq, res.text, translation, res.language, tgt,
+                            line_ref))
                     # end-to-end latency: process start -> ready to send
                     dt = (_time.time() - t0) * 1000.0
                     _e2e_samples.append(dt)
