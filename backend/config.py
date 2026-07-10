@@ -151,14 +151,16 @@ class Settings:
     # How many previous final sentences to feed as context for coherence.
     CONTEXT_WINDOW = _i("RT_CONTEXT_WINDOW", 3)
 
-    # --- Cross-stream echo dedup ----------------------------------------------
+    # --- Cross-stream echo dedup (EXPERIMENTAL — default OFF) ------------------
     # When the meeting plays through SPEAKERS, the far side's voice re-enters
     # the mic: the same sentence arrives on BOTH streams (system = THEM, then
-    # mic = ME) seconds apart and shows up duplicated. Client-side AEC proved
-    # unusable (voice processing ducks the system output the user needs to
-    # hear). Instead the relay drops a final whose text closely matches a
-    # recent final from the OTHER stream in the same room.
-    DEDUP_ENABLED = _s("RT_DEDUP_ENABLED", "1") == "1"
+    # mic = ME) seconds apart and shows up duplicated. This text-similarity
+    # dedup FAILED in field testing: per-stream VAD cuts sentences at different
+    # boundaries so fragments miss the similarity bar, and the echo (ME) often
+    # finalizes BEFORE the genuine THEM line — deleting the wrong side. Kept
+    # behind a default-off knob for experiments; the real mitigations are a
+    # headset (no echo path at all) or the app's audio-correlation mic gate.
+    DEDUP_ENABLED = _s("RT_DEDUP_ENABLED", "0") == "1"
     DEDUP_WINDOW_S = _f("RT_DEDUP_WINDOW_S", 7.0)      # echo arrives within this
     DEDUP_SIMILARITY = _f("RT_DEDUP_SIMILARITY", 0.72) # SequenceMatcher ratio
 
