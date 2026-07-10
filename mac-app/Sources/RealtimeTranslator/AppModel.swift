@@ -313,6 +313,17 @@ final class AppModel: ObservableObject {
         (UserDefaults.standard.object(forKey: "micAEC") as? Bool ?? false) {
         didSet { UserDefaults.standard.set(micAEC, forKey: "micAEC") }
     }
+    // Echo gate — OUR replacement for AEC (which ducked system volume and muted
+    // the mic in the field): correlates the mic against the system-audio stream
+    // and drops mic chunks that are just the speaker's sound re-entering.
+    // Device-independent, touches nothing outside this app. Default ON; no-op
+    // for headset users (no acoustic leak -> no stable correlation).
+    @Published var echoGateEnabled: Bool =
+        (UserDefaults.standard.object(forKey: "echoGateEnabled") as? Bool ?? true) {
+        didSet { UserDefaults.standard.set(echoGateEnabled, forKey: "echoGateEnabled") }
+    }
+    /// Live indicator: the gate is currently suppressing mic input (echo heard).
+    @Published var echoGateActive = false
     @Published var inputDevices: [AudioDevice] = []
     @Published var outputDevices: [AudioDevice] = []
     // Selected audio devices, persisted by device UID-ish ID. NOTE: AudioDeviceID
@@ -347,6 +358,7 @@ final class AppModel: ObservableObject {
     @Published var flowInfo = ""
 
     private let mic = MicCapture()
+    private let echoGate = EchoGate()
     private var sysCapture: AnyObject?     // SystemAudioCapture (macOS 13+)
     // Two independent relay connections — the backend is per-connection, so each
     // stream gets its own VAD/endpointing, whisper calls, and translation context.
@@ -827,6 +839,7 @@ final class AppModel: ObservableObject {
         cap.onSamples = { [weak self] s in
             guard let self else { return }
             self.sysFlow.add(s.count)
+            self.echoGate.pushSystem(s)   // reference for the mic echo gate
             self.sysClient.sendAudio(floatsToPCM16(s))
         }
         sysCapture = cap
@@ -855,11 +868,25 @@ final class AppModel: ObservableObject {
         // audio (thread-safe counters/WS send), so it's fine off-main.
         let selected = selectedInputID
         let aec = micAEC
+        let gateOn = echoGateEnabled
+        echoGate.reset()
+        echoGate.onTransition = { [weak self] gating in
+            rtlog("echoGate: \(gating ? "SUPPRESSING mic (speaker echo)" : "passing mic")")
+            Task { @MainActor in self?.echoGateActive = gating }
+        }
         let begin: () -> Void = { [weak self] in
             guard let self else { return }
             self.mic.onSamples = { [weak self] s in
                 guard let self else { return }
                 self.micFlow.add(s.count)
+                // Echo gate: drop mic chunks that are the speakers' sound
+                // re-entering the mic. Suppressed audio is replaced by silence
+                // (not skipped) so the relay's VAD sees continuous time and
+                // closes any open utterance naturally.
+                if gateOn, self.echoGate.pushMic(s) {
+                    self.micClient.sendAudio(floatsToPCM16([Float](repeating: 0, count: s.count)))
+                    return
+                }
                 self.micClient.sendAudio(floatsToPCM16(s))
             }
             // MicCapture.startAsync runs the blocking AVAudioEngine work on its
@@ -890,6 +917,7 @@ final class AppModel: ObservableObject {
             cap.onSamples = { [weak self] s in
                 guard let self else { return }
                 self.sysFlow.add(s.count)
+                self.echoGate.pushSystem(s)   // reference for the mic echo gate
                 self.sysClient.sendAudio(floatsToPCM16(s))
             }
             sysCapture = cap

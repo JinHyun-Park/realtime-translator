@@ -231,6 +231,17 @@ struct ControlPanel: View {
                             .disabled(model.running)
                         Toggle("Microphone / input", isOn: $model.captureMic)
                             .disabled(model.running)
+                        HStack(spacing: 6) {
+                            Toggle(L10n.t("audio.echoGate"), isOn: $model.echoGateEnabled)
+                                .disabled(model.running || !model.captureMic)
+                            if model.echoGateActive {
+                                Text(L10n.t("audio.echoGate.active"))
+                                    .font(.caption2).foregroundStyle(.orange)
+                            }
+                        }
+                        Text(L10n.t("audio.echoGate.help"))
+                            .font(.caption2).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
                         Toggle(L10n.t("audio.aec"), isOn: $model.micAEC)
                             .disabled(model.running || !model.captureMic)
                         Text(L10n.t("audio.aec.help"))
