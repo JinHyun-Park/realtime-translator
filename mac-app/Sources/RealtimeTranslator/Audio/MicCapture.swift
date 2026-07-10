@@ -16,6 +16,16 @@ final class MicCapture {
     private let q = DispatchQueue(label: "rt.mic.engine")
     var onSamples: (([Float]) -> Void)?
 
+    // Auto-restart on device-graph changes: switching the DEFAULT OUTPUT
+    // device (e.g. headphones -> MacBook speakers) fires
+    // AVAudioEngineConfigurationChange and silently STOPS the engine — the
+    // mic looks alive but no samples flow. Remember what we started with so
+    // the observer can rebuild the exact same capture.
+    private var running = false
+    private var lastDevice: AudioDeviceID?
+    private var lastAec = false
+    private var configObserver: NSObjectProtocol?
+
     /// Start on the private queue. `onError` is called (on that queue) with nil
     /// on success or a message on failure — callers hop to the main actor.
     /// `aec`: enable macOS voice processing (echo cancellation). OFF by default
@@ -29,6 +39,10 @@ final class MicCapture {
             do {
                 try self.setInputDeviceLocked(device)
                 try self.startLocked(aec: aec)
+                self.running = true
+                self.lastDevice = device
+                self.lastAec = aec
+                self.installConfigObserverLocked()
                 rtlog("mic.start() OK device=\(String(describing: device)) aec=\(aec)")
                 onError(nil)
             } catch {
@@ -39,7 +53,41 @@ final class MicCapture {
     }
 
     func stopAsync() {
-        q.async { [weak self] in self?.stopLocked() }
+        q.async { [weak self] in
+            guard let self else { return }
+            self.running = false
+            if let obs = self.configObserver {
+                NotificationCenter.default.removeObserver(obs)
+                self.configObserver = nil
+            }
+            self.stopLocked()
+        }
+    }
+
+    /// AVAudioEngine stops itself when the audio device graph changes (default
+    /// output switch, headphones plugged/unplugged, ...). Rebuild the tap with
+    /// the same device+AEC so capture survives the change. Debounced on our
+    /// serial queue; a burst of change notifications collapses into one rebuild.
+    private func installConfigObserverLocked() {
+        guard configObserver == nil else { return }
+        configObserver = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange, object: engine,
+            queue: nil
+        ) { [weak self] _ in
+            guard let self else { return }
+            self.q.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                guard let self, self.running, !self.engine.isRunning else { return }
+                rtlog("mic: engine config change — restarting capture")
+                self.stopLocked()
+                do {
+                    try self.setInputDeviceLocked(self.lastDevice)
+                    try self.startLocked(aec: self.lastAec)
+                    rtlog("mic: restart after config change OK")
+                } catch {
+                    rtlog("mic: restart after config change FAILED: \(error.localizedDescription)")
+                }
+            }
+        }
     }
 
     // --- private, always run on `q` ---
