@@ -44,6 +44,9 @@ ENDPOINT = {
     # speech follows it inside the same utterance (no pause needed) — a
     # non-stop talker gets per-sentence finals instead of 5-sentence blocks.
     "sentence_flush": settings.SENTENCE_FLUSH,
+    # Send the grey in-progress preview to clients? Interim ASR always runs
+    # (endpointing + flush depend on it); this only controls translate+send.
+    "interim_display": settings.INTERIM_DISPLAY,
 }
 
 # Sentence-final punctuation Whisper emits when it judges an utterance complete

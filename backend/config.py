@@ -164,6 +164,16 @@ class Settings:
     DEDUP_WINDOW_S = _f("RT_DEDUP_WINDOW_S", 7.0)      # echo arrives within this
     DEDUP_SIMILARITY = _f("RT_DEDUP_SIMILARITY", 0.72) # SequenceMatcher ratio
 
+    # --- Interim (grey preview) display ----------------------------------------
+    # OFF by default (user decision 2026-07-11): the constantly-revised grey
+    # line was more confusing than helpful — it re-translated on every tick,
+    # reflowed the layout, and with sentence flush the finals are fast enough
+    # to follow on their own. Interim ASR still RUNS server-side (it powers
+    # punctuation endpointing and the sentence-boundary flush); only the
+    # translate+send step is skipped, which also saves the per-tick Qwen call.
+    # Re-enable live via /control/endpoint?interim=1 or RT_INTERIM_DISPLAY=1.
+    INTERIM_DISPLAY = _s("RT_INTERIM_DISPLAY", "0") == "1"
+
     # --- Sentence-boundary flush -------------------------------------------------
     # A non-stop talker used to accumulate 5+ sentences into one grey interim
     # that only finalized on a pause or the max-segment ceiling — a huge block

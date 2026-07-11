@@ -371,6 +371,11 @@ async def _handle(ws):
     # two fragments become one repaired sentence. The archive line is fixed too.
     last_final: dict | None = None
 
+    # Ordered final pipeline: every final (pause, punctuation, max-segment,
+    # sentence-flush) goes through ONE queue drained by final_worker below, so
+    # confirmed subtitles always appear in speech order.
+    final_queue: asyncio.Queue = asyncio.Queue()
+
     # Interim scheduling: interims tick every INTERIM_INTERVAL_MS but the
     # pipeline (ASR + translate) can take LONGER than one tick on a long
     # sentence. The old cancel-the-inflight-one policy then starved the screen:
@@ -407,6 +412,17 @@ async def _handle(ws):
         except Exception:
             log.exception("refine error (subtitle keeps fast translation)")
 
+    async def send_dedup(seq: int):
+        # Tell clients to clear anything they still show for this seq (a grey
+        # interim from an older session/toggle, or a line whose final was
+        # dropped). Best-effort.
+        try:
+            payload = {"type": "dedup", "seq": seq, "stream": stream}
+            await ws.send(json.dumps(payload))
+            await broadcast(payload, room)
+        except Exception:
+            pass
+
     async def process(ev, is_final: bool):
         t0 = _time.time()
         try:
@@ -419,6 +435,7 @@ async def _handle(ws):
                     METRICS["finals_dropped"] += 1
                     log.warning("final dropped (no ASR text) seq=%s stream=%s",
                                 ev.seq, stream)
+                    await send_dedup(ev.seq)   # never leave an orphaned line
                 return
             # Punctuation-aware endpointing: if this INTERIM transcription looks
             # like a completed sentence, tell the segmenter so it finalizes early
@@ -432,9 +449,11 @@ async def _handle(ws):
                     seg.mark_sentence_incomplete(ev.seq)
                 # Sentence-boundary flush: a COMPLETED sentence with speech
                 # continuing after it finalizes NOW — no pause needed. The
-                # segmenter splits the live buffer at the boundary word; the
-                # finished sentence goes through the normal final path (full
-                # ASR + Claude), the remainder keeps rolling as a new seq.
+                # segmenter splits the live buffer at the boundary word. The
+                # finished sentence is ENQUEUED on the same ordered final
+                # queue as normal finals — processing it inline here (as v1
+                # did) let a slow flush-final overtake the NEXT sentence's
+                # fast final, so confirmed lines appeared out of order.
                 if want_words and res.words:
                     snap_s = len(ev.pcm) / 2 / settings.SAMPLE_RATE
                     b = find_flush_boundary(
@@ -446,12 +465,18 @@ async def _handle(ws):
                             log.info("sentence flush: seq=%s split at %.2fs "
                                      "(%d words)", fin.seq, b[0], b[1])
                             interim_pending.pop(ev.seq, None)  # snapshots now stale
-                            await process(fin, True)
+                            final_queue.put_nowait(fin)
                             # Don't render THIS interim: its snapshot still
                             # contains the just-finalized sentence and would
                             # resurrect the grey line the final replaced. The
                             # next tick previews the remainder under a new seq.
                             return
+            # Interims stop here unless preview display is enabled: the text
+            # above already fed endpointing + sentence flush; translating and
+            # sending the grey line is pure display work (and a Qwen call per
+            # tick) that the user opted out of.
+            if not is_final and not ENDPOINT.get("interim_display", False):
+                return
             # Cross-stream echo dedup: with speakers, the far side's voice also
             # enters the mic — the same sentence would show as THEM and again
             # as ME. Drop the echo BEFORE spending a translation call on it.
@@ -459,9 +484,7 @@ async def _handle(ws):
             # preview (old clients ignore the unknown type; their preview
             # lingers until the next utterance, same as any dropped final).
             if is_final and stream and _is_cross_stream_echo(room, stream, res.text):
-                payload = {"type": "dedup", "seq": ev.seq, "stream": stream}
-                await ws.send(json.dumps(payload))
-                await broadcast(payload, room)
+                await send_dedup(ev.seq)
                 return
             # Live fragment merge: this final continues a mid-thought cut?
             nonlocal last_final
@@ -537,6 +560,13 @@ async def _handle(ws):
                     METRICS["finals_dropped"] += 1
                     log.warning("final dropped (empty translation) seq=%s src='%s'",
                                 ev.seq, res.text[:40])
+                    await send_dedup(ev.seq)   # never leave an orphaned line
+                    return
+            # Interim display gate: when OFF (default — the constantly-revised
+            # grey line confused more than it helped), in-progress previews are
+            # never sent. Interim ASR still ran above (endpointing + sentence
+            # flush feed off it); we skip only translate+send for interims —
+            # and we already returned before translate in that case.
             payload = {
                 "type": "final" if is_final else "interim",
                 "seq": ev.seq,
@@ -569,6 +599,20 @@ async def _handle(ws):
                 return
             await process(ev, False)
 
+    async def final_worker():
+        # ALL finals — pause/flush/max-segment/sentence-flush alike — are
+        # processed by this single worker in arrival order. This is the
+        # ordering guarantee: a slow final can never be overtaken by a faster
+        # later one (confirmed subtitles appear in speech order, and the
+        # translation context history stays coherent). Sentence-flush finals
+        # enqueue from inside interim processing; ws-loop finals enqueue in
+        # dispatch(). None = session closing.
+        while True:
+            ev = await final_queue.get()
+            if ev is None:
+                return
+            await process(ev, True)
+
     async def dispatch(events):
         for ev in events:
             if ev.kind == "interim":
@@ -582,9 +626,9 @@ async def _handle(ws):
                 w = interim_workers.pop(ev.seq, None)
                 if w and not w.done():
                     w.cancel()
-                # Finals are awaited in order so context history stays coherent.
-                await process(ev, True)
+                final_queue.put_nowait(ev)
 
+    finals_task = asyncio.create_task(final_worker())
     try:
         async for message in ws:
             # A bad single frame must never drop the whole session.
@@ -629,6 +673,13 @@ async def _handle(ws):
             await dispatch(seg.flush())
         except Exception:
             pass
+        # Let the final worker drain everything queued (incl. the flush above),
+        # then stop it. The transcript/archive below must see those lines.
+        try:
+            final_queue.put_nowait(None)
+            await asyncio.wait_for(finals_task, timeout=30)
+        except Exception:
+            finals_task.cancel()
         # Deregister this capture from the metrics registry; drop empty room lists.
         caps = CAPTURES_BY_ROOM.get(room)
         if caps and cap_info in caps:
@@ -962,6 +1013,12 @@ async def _serve_http(port: int = 9000):
                             ENDPOINT["incomplete_hold"] = max(1.0, min(4.0, float(qs["hold"][0])))
                         except ValueError:
                             pass
+                    if "interim" in qs:
+                        # grey in-progress preview on/off (display only)
+                        ENDPOINT["interim_display"] = (qs["interim"][0] not in ("0", "false", "False"))
+                    if "flush" in qs:
+                        # sentence-boundary flush on/off
+                        ENDPOINT["sentence_flush"] = (qs["flush"][0] not in ("0", "false", "False"))
                     log.info("control/endpoint -> %s", ENDPOINT)
                     body = json.dumps({"ok": True, **ENDPOINT}).encode()
                 else:  # /control/idle
