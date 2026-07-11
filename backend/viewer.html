@@ -14,7 +14,7 @@
   #dot { width:9px; height:9px; border-radius:50%; background:#6b7280; }
   #dot.live { background:#22c55e; } #dot.off { background:#ef4444; }
   #status { opacity:.7; }
-  #log { padding:54px 18px 40vh; max-width:920px; margin:0 auto;
+  #log { padding:54px 18px 26vh; max-width:920px; margin:0 auto;
     display:flex; flex-direction:column; gap:13px; }
   .line { font-size:29px; line-height:1.36; }
   @media (min-width:700px){ .line{ font-size:37px; } }
@@ -23,20 +23,34 @@
   .me   .tag { background:#1d4ed8; }
   .them .tag { background:#047857; }
   .src  { opacity:.45; font-size:.6em; display:block; margin-top:3px; }
-  .interim { opacity:.5; font-style:italic; }
   #empty { opacity:.4; text-align:center; margin-top:30vh; font-size:18px; }
+  /* Rolling ticker: a FIXED one-line-per-stream strip pinned to the bottom.
+     The newest in-progress text REPLACES the previous one in place — the
+     document flow above never moves, so confirmed lines don't jump around. */
+  #ticker { position:fixed; left:0; right:0; bottom:0; z-index:9;
+    background:linear-gradient(transparent, #0b0d12 22%);
+    padding:18px 18px 12px; pointer-events:none; }
+  #ticker .tline { max-width:920px; margin:0 auto; font-size:22px;
+    line-height:1.3; opacity:.62; font-style:italic;
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+    direction:rtl; text-align:left; }   /* rtl+ellipsis: keep the TAIL visible */
+  #ticker .tline > bdi { direction:ltr; unicode-bidi:isolate; }
+  @media (min-width:700px){ #ticker .tline{ font-size:26px; } }
+  #ticker .tag { font-size:.5em; }
 </style>
 </head>
 <body>
 <div id="bar"><span id="dot"></span><span id="status">연결 중… / connecting…</span></div>
 <div id="log"></div>
 <div id="empty">자막을 기다리는 중입니다 / waiting for speech…</div>
+<div id="ticker"></div>
 <script>
 (function () {
   var logEl = document.getElementById("log");
   var statusEl = document.getElementById("status");
   var dotEl = document.getElementById("dot");
   var emptyEl = document.getElementById("empty");
+  var tickerEl = document.getElementById("ticker");
   // Access password: from ?key=... in the URL, or saved, or prompt once.
   function getKey() {
     var u = new URLSearchParams(location.search).get("key");
@@ -63,9 +77,10 @@
     if (rtSecret) u += "&rs=" + encodeURIComponent(rtSecret);
     return u;
   }
-  var interimNodes = {};   // (stream:seq) -> node, for in-place interim updates
   var finalNodes = {};     // (stream:seq) -> node, so a later "refine" frame
                            // can swap the line's translation in place
+  // Rolling ticker state: ONE line per stream, newest interim replaces it.
+  var tickerNodes = {};    // stream -> {node, seq}
   var ws, backoff = 500;
 
   function atBottom() {
@@ -78,38 +93,62 @@
     return [m.src === "ko" ? "me" : "them", (m.src||"").toUpperCase()];
   }
 
-  function render(m, isFinal) {
+  function renderFinal(m) {
     if (emptyEl) { emptyEl.remove(); emptyEl = null; }
     var t = tagFor(m), cls = t[0], label = t[1];
     var key = (m.stream || m.src || "") + ":" + m.seq;
     var stick = atBottom();
-    var node = isFinal ? null : interimNodes[key];
-    if (!node) {
-      node = document.createElement("div");
-      logEl.appendChild(node);
-      if (!isFinal) interimNodes[key] = node;
-    }
-    node.className = "line " + cls + (isFinal ? "" : " interim");
+    var node = document.createElement("div");
+    logEl.appendChild(node);
+    node.className = "line " + cls;
     node.innerHTML = '<span class="tag">' + label + '</span>'
       + escapeHTML(m.translation || "…")
       + '<span class="src">' + escapeHTML(m.source || "") + '</span>';
-    if (isFinal && interimNodes[key]) {
-      if (interimNodes[key] !== node) interimNodes[key].remove();
-      delete interimNodes[key];
-    }
-    if (isFinal) finalNodes[key] = node;
+    finalNodes[key] = node;
+    // This utterance is confirmed — clear its stream's ticker line (unless a
+    // newer utterance already took it over).
+    clearTicker(m.stream, m.seq);
     if (stick) window.scrollTo(0, document.body.scrollHeight);
   }
 
-  // Echo dedup: this utterance was the other stream's audio leaking in — its
-  // final was suppressed server-side; remove the orphaned grey interim line.
+  // Rolling ticker: the latest in-progress text for a stream REPLACES the
+  // previous one in a fixed bottom strip. One line per stream, no layout
+  // reflow, tail kept visible (start of a long sentence ellipsizes away).
+  function renderTicker(m) {
+    if (emptyEl) { emptyEl.remove(); emptyEl = null; }
+    var t = tagFor(m), cls = t[0], label = t[1];
+    var stream = m.stream || m.src || "";
+    var slot = tickerNodes[stream];
+    if (!slot) {
+      var node = document.createElement("div");
+      tickerEl.appendChild(node);
+      slot = tickerNodes[stream] = { node: node, seq: m.seq };
+    }
+    slot.seq = m.seq;
+    slot.node.className = "tline " + cls;
+    slot.node.innerHTML = '<bdi><span class="tag">' + label + '</span>'
+      + escapeHTML(m.translation || m.source || "…") + '</bdi>';
+  }
+
+  function clearTicker(stream, seq) {
+    var slot = tickerNodes[stream || ""];
+    if (!slot) return;
+    // Only clear if the ticker still shows THIS utterance; a newer seq's
+    // preview may already occupy the line.
+    if (seq === undefined || slot.seq === seq || slot.seq < seq) {
+      slot.node.remove();
+      delete tickerNodes[stream || ""];
+    }
+  }
+
+  // Echo dedup / dropped final: the server abandoned this utterance — clear
+  // its ticker line so nothing lingers.
   function dedup(m) {
-    var key = (m.stream || "") + ":" + m.seq;
-    if (interimNodes[key]) { interimNodes[key].remove(); delete interimNodes[key]; }
+    clearTicker(m.stream, m.seq);
   }
 
   // Post-final refine: the server re-translated a finalized line with more
-  // context — swap the translation in place (no new line, no reflow jump).
+  // context (possibly merging in a continuation fragment) — swap in place.
   function refine(m) {
     var key = (m.stream || m.src || "") + ":" + m.seq;
     var node = finalNodes[key];
@@ -129,8 +168,9 @@
   // and bring back the "waiting" placeholder, as if the tab were freshly opened.
   function clearLog() {
     logEl.innerHTML = "";
-    interimNodes = {};
+    tickerEl.innerHTML = "";
     finalNodes = {};
+    tickerNodes = {};
     if (!emptyEl) {
       emptyEl = document.createElement("div");
       emptyEl.id = "empty";
@@ -148,8 +188,8 @@
     };
     ws.onmessage = function (ev) {
       var m; try { m = JSON.parse(ev.data); } catch (e) { return; }
-      if (m.type === "final") render(m, true);
-      else if (m.type === "interim") render(m, false);
+      if (m.type === "final") renderFinal(m);
+      else if (m.type === "interim") renderTicker(m);
       else if (m.type === "refine") refine(m);
       else if (m.type === "dedup") dedup(m);
       else if (m.type === "clear") clearLog();

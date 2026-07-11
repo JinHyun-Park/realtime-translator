@@ -54,9 +54,14 @@ def sanitize_translation(out: str, tgt: str, src_text: str) -> str | None:
     if not s:
         return None
     max_len = max(3 * len(src_text), 120)
-    if _target_ratio(s, tgt) >= 0.6 and len(s) <= max_len:
+    # Accept threshold is deliberately LOW (0.35): translations legitimately
+    # mix scripts ("Kafka 마이그레이션", Qwen's "今 quarter の売上..."), and a
+    # dropped real translation is worse than an awkward one. Analysis prose is
+    # overwhelmingly source/English text — it lands near 0.0-0.2.
+    if _target_ratio(s, tgt) >= 0.35 and len(s) <= max_len:
         return s
-    # Rescue: scan paragraphs (then lines) from the END for a clean chunk.
+    # Rescue: scan paragraphs (then lines) from the END for a clean chunk
+    # (models put the actual answer after their analysis).
     for splitter in ("\n\n", "\n"):
         for part in reversed(s.split(splitter)):
             p = part.strip().strip('"“”「」『』')

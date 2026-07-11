@@ -1104,16 +1104,18 @@ final class AppModel: ObservableObject {
                     }
                 }
             }
-            if stream == "mic", micInterim?.id == uid { micInterim = nil }
-            if stream == "system", sysInterim?.id == uid { sysInterim = nil }
+            // Clear this stream's ticker line unless a NEWER utterance's
+            // preview already took it over (sentence flush advances seq while
+            // the ticker shows the remainder).
+            if stream == "mic", let t = micInterim, t.id <= uid { micInterim = nil }
+            if stream == "system", let t = sysInterim, t.id <= uid { sysInterim = nil }
         case "dedup":
-            // Echo dedup: this utterance was the other stream's audio leaking
-            // in (speaker -> mic). Its final was suppressed server-side; just
-            // clear the orphaned grey interim so it doesn't linger.
+            // Echo dedup / dropped final: the server abandoned this utterance;
+            // clear its ticker line so nothing lingers.
             guard let seq = msg.seq else { return }
             let uid = lineID(seq, stream: stream)
-            if stream == "mic", micInterim?.id == uid { micInterim = nil }
-            if stream == "system", sysInterim?.id == uid { sysInterim = nil }
+            if stream == "mic", let t = micInterim, t.id <= uid { micInterim = nil }
+            if stream == "system", let t = sysInterim, t.id <= uid { sysInterim = nil }
         case "refine":
             // Post-final refine OR live fragment merge: the server improved
             // this line (better translation, possibly with the source text

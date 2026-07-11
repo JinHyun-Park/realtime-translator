@@ -41,21 +41,47 @@ struct TranscriptView: View {
             SelectableText(attributed: transcriptAttributed(), autoScroll: true)
                 .padding(.horizontal, 12).padding(.vertical, 8)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+
+            // Rolling ticker: the in-progress line lives HERE, in a fixed
+            // one-line-per-stream strip below the transcript — the newest text
+            // replaces the previous in place, so confirmed lines above never
+            // reflow or jump while someone is speaking.
+            if model.micInterim != nil || model.sysInterim != nil {
+                Divider()
+                VStack(alignment: .leading, spacing: 2) {
+                    if let s = model.sysInterim { tickerRow(s) }
+                    if let m = model.micInterim { tickerRow(m) }
+                }
+                .padding(.horizontal, 14).padding(.vertical, 6)
+            }
         }
     }
 
-    /// Build the whole transcript (finals + the two interim lines) as one
-    /// attributed string: speaker label + (optional) source + translation.
+    /// One fixed ticker row: tag + tail-truncated in-progress translation.
+    private func tickerRow(_ line: Line) -> some View {
+        HStack(spacing: 6) {
+            Text(line.stream == "mic" ? "ME" : "THEM")
+                .font(.system(size: 9, weight: .bold, design: .monospaced))
+                .padding(.horizontal, 5).padding(.vertical, 1)
+                .background(line.stream == "mic" ? Color.blue : Color.green)
+                .foregroundColor(.white)
+                .cornerRadius(4)
+            Text(line.translation.isEmpty ? line.source : line.translation)
+                .font(.system(size: 13))
+                .italic()
+                .foregroundColor(.secondary)
+                .lineLimit(1)
+                .truncationMode(.head)   // keep the TAIL (newest words) visible
+            Spacer(minLength: 0)
+        }
+    }
+
+    /// Build the whole transcript (confirmed lines only — the in-progress
+    /// preview lives in the fixed ticker strip below, not in this flow).
     private func transcriptAttributed() -> NSAttributedString {
         let out = NSMutableAttributedString()
         for line in model.lines {
             out.append(TranscriptStyle.block(line, showSource: showSource, dim: false))
-        }
-        if let m = model.micInterim {
-            out.append(TranscriptStyle.block(m, showSource: showSource, dim: true))
-        }
-        if let s = model.sysInterim {
-            out.append(TranscriptStyle.block(s, showSource: showSource, dim: true))
         }
         if out.length == 0 {
             return NSAttributedString(
