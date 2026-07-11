@@ -96,6 +96,7 @@ enum L10n {
         "st.viewersCleared": [.ko: "뷰어 화면 비움 완료", .ja: "ビューア画面をクリアしました", .en: "Viewers cleared"],
         "warn.sysAudioReconnecting": [.ko: "⚠️ 시스템 오디오 끊김 — 재연결 중… (%d)", .ja: "⚠️ システム音声が途切れました — 再接続中… (%d)", .en: "⚠️ System audio dropped — reconnecting… (%d)"],
         "warn.sysAudioDead": [.ko: "⚠️ 시스템 오디오 복구 실패 — 아래 ‘오디오 엔진 재시작’을 누르거나 앱을 완전히 종료(⌘Q) 후 다시 켜주세요", .ja: "⚠️ システム音声の復旧に失敗 — 下の「オーディオエンジンを再起動」を押すか、アプリを完全に終了（⌘Q）して再起動してください", .en: "⚠️ System audio recovery failed — tap ‘Restart audio engine’ below, or quit the app (⌘Q) and reopen it"],
+        "ticker.label": [.ko: "실시간 미리보기 — 확정 자막은 위에 표시됩니다", .ja: "リアルタイムプレビュー — 確定字幕は上に表示されます", .en: "Live preview — confirmed subtitles appear above"],
         "audio.echoGate": [.ko: "에코 게이트 (스피커 중복 방지)", .ja: "エコーゲート（スピーカー重複防止）", .en: "Echo gate (speaker dedup)"],
         "audio.echoGate.active": [.ko: "● 에코 차단 중", .ja: "● エコー遮断中", .en: "● blocking echo"],
         "audio.echoGate.help": [.ko: "스피커로 나온 상대방 소리가 마이크로 재유입되어 ME로 중복 표시되는 것을 오디오 비교로 차단합니다. 헤드셋 사용 시엔 영향 없음.", .ja: "スピーカーから出た相手の音声がマイクに回り込みMEとして重複表示されるのを音声比較で遮断します。ヘッドセット使用時は影響なし。", .en: "Blocks speaker audio re-entering the mic (shown duplicated as ME) by comparing the two audio streams. No effect with headsets."],

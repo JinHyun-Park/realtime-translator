@@ -49,6 +49,9 @@ struct TranscriptView: View {
             if model.micInterim != nil || model.sysInterim != nil {
                 Divider()
                 VStack(alignment: .leading, spacing: 2) {
+                    Text(L10n.t("ticker.label"))
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundColor(Color.secondary.opacity(0.7))
                     if let s = model.sysInterim { tickerRow(s) }
                     if let m = model.micInterim { tickerRow(m) }
                 }

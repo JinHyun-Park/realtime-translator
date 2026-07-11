@@ -30,6 +30,9 @@
   #ticker { position:fixed; left:0; right:0; bottom:0; z-index:9;
     background:linear-gradient(transparent, #0b0d12 22%);
     padding:18px 18px 12px; pointer-events:none; }
+  #tickerLabel { max-width:920px; margin:0 auto 4px; font-size:11px;
+    letter-spacing:.4px; opacity:.45; display:none; }
+  #ticker.on #tickerLabel { display:block; }
   #ticker .tline { max-width:920px; margin:0 auto; font-size:22px;
     line-height:1.3; opacity:.62; font-style:italic;
     white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
@@ -43,7 +46,7 @@
 <div id="bar"><span id="dot"></span><span id="status">연결 중… / connecting…</span></div>
 <div id="log"></div>
 <div id="empty">자막을 기다리는 중입니다 / waiting for speech…</div>
-<div id="ticker"></div>
+<div id="ticker"><div id="tickerLabel">실시간 미리보기 / LIVE PREVIEW ・ 확정 자막은 위에 표시됩니다</div></div>
 <script>
 (function () {
   var logEl = document.getElementById("log");
@@ -123,6 +126,7 @@
       var node = document.createElement("div");
       tickerEl.appendChild(node);
       slot = tickerNodes[stream] = { node: node, seq: m.seq };
+      tickerEl.className = "on";   // label shows only while a preview is live
     }
     slot.seq = m.seq;
     slot.node.className = "tline " + cls;
@@ -138,6 +142,7 @@
     if (seq === undefined || slot.seq === seq || slot.seq < seq) {
       slot.node.remove();
       delete tickerNodes[stream || ""];
+      if (Object.keys(tickerNodes).length === 0) tickerEl.className = "";
     }
   }
 
@@ -168,7 +173,8 @@
   // and bring back the "waiting" placeholder, as if the tab were freshly opened.
   function clearLog() {
     logEl.innerHTML = "";
-    tickerEl.innerHTML = "";
+    tickerEl.innerHTML = '<div id="tickerLabel">실시간 미리보기 / LIVE PREVIEW ・ 확정 자막은 위에 표시됩니다</div>';
+    tickerEl.className = "";
     finalNodes = {};
     tickerNodes = {};
     if (!emptyEl) {
