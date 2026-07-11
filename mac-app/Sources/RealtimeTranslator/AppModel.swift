@@ -609,11 +609,12 @@ final class AppModel: ObservableObject {
             let (_, resp) = try await URLSession.shared.data(for: req)
             let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
             if code == 401 || code == 403 {
-                await MainActor.run {
-                    self.serverPhase = .failed(L10n.t("st.pwWrong"))
-                    self.wakeDetail = ""
-                }
-                return
+                // NOT proof of a bad password: some AWS orgs block Lambda
+                // Function URL invocations outright, so /wake can 403 even with
+                // a valid token. Fall through to /healthz — if the box is up we
+                // start anyway; a genuinely wrong token still fails loudly at
+                // capture connect (4401 unauthorized).
+                rtlog("wake returned \(code) — ignoring, polling healthz")
             }
             await MainActor.run { self.serverPhase = .booting }
         } catch {
