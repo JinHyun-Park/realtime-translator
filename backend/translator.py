@@ -25,6 +25,45 @@ log = logging.getLogger("rt.translator")
 
 LANG_NAME = {"ko": "Korean", "ja": "Japanese", "en": "English"}
 
+
+def _is_target_char(ch: str, tgt: str) -> bool:
+    if tgt == "ko":
+        return "가" <= ch <= "힣" or "㄰" <= ch <= "㆏"
+    if tgt == "ja":
+        return ("぀" <= ch <= "ヿ") or ("一" <= ch <= "鿿")
+    return ch.isascii() and ch.isalpha()      # en
+
+
+def _target_ratio(text: str, tgt: str) -> float:
+    letters = [c for c in text if c.isalpha()]
+    if not letters:
+        return 0.0
+    return sum(1 for c in letters if _is_target_char(c, tgt)) / len(letters)
+
+
+def sanitize_translation(out: str, tgt: str, src_text: str) -> str | None:
+    """Guard against the model 'thinking out loud': on a tricky idiom or a
+    suspected mishearing the LLM sometimes prints its ANALYSIS (usually in
+    English) before/around the actual translation — which then lands verbatim
+    on the subtitle. Accept the output only if it actually looks like a
+    translation: mostly target-script and not absurdly long. If it fails,
+    try to rescue the real translation (the last target-script paragraph —
+    models put the answer at the end); otherwise return None so the caller
+    keeps/derives a safer result. Pure function, unit-tested."""
+    s = (out or "").strip().strip('"“”「」『』')
+    if not s:
+        return None
+    max_len = max(3 * len(src_text), 120)
+    if _target_ratio(s, tgt) >= 0.6 and len(s) <= max_len:
+        return s
+    # Rescue: scan paragraphs (then lines) from the END for a clean chunk.
+    for splitter in ("\n\n", "\n"):
+        for part in reversed(s.split(splitter)):
+            p = part.strip().strip('"“”「」『』')
+            if p and _target_ratio(p, tgt) >= 0.7 and len(p) <= max_len:
+                return p
+    return None
+
 # Runtime-mutable provider switch, seeded from config. The app flips this live
 # via /control/llm without a redeploy. "bedrock" => Claude Sonnet 4.6; anything
 # else => the local vLLM/Ollama (Qwen) path. A stop/start resets it to the env
@@ -83,6 +122,10 @@ class Translator:
             "Rules:\n"
             "- Output ONLY the translation. No quotes, no notes, no romaji, "
             "no explanations, no language labels.\n"
+            "- NEVER analyze or comment on the input — even if it seems "
+            "misheard, ambiguous, or idiomatic, silently pick the most likely "
+            "intended meaning and translate it. Commentary on a subtitle "
+            "screen is worse than an imperfect translation.\n"
             "- Preserve names, numbers, and honorific register.\n"
             "- Translate the FULL sentence naturally; do not translate word-by-word.\n"
             "- If the input is an incomplete fragment, translate it as a natural "
@@ -132,6 +175,17 @@ class Translator:
             Translator.llm_errors += 1            # observability: lost translation
             return "", tgt
 
+        # Anti-commentary guard: on tricky idioms/mishearings the model can
+        # emit its ANALYSIS around the translation ("here 'club' likely
+        # means..."). Keep only output that actually looks like a translation;
+        # rescue the trailing target-script chunk if the analysis included one.
+        clean = sanitize_translation(out, tgt, text)
+        if clean is None:
+            log.warning("translation rejected by sanitizer (len=%d): %.80s",
+                        len(out), out)
+            return "", tgt
+        out = clean
+
         # Only finals shape future context (interims are noisy/half-formed).
         if final and out:
             self._history.append((speaker, text, out))
@@ -170,8 +224,10 @@ class Translator:
             out = await self._translate_vllm(user, system, ctx, 0.0, False)
         if not out:
             return None
-        out = out.strip()
-        if not out or out == fast.strip():
+        # Same anti-commentary guard as translate(): a refine that came back
+        # as analysis prose must never replace a good on-screen subtitle.
+        out = sanitize_translation(out, tgt, text)
+        if out is None or out == fast.strip():
             return None
         # Refined result replaces the fast one in the shared context too, so
         # later lines build on the corrected phrasing.
