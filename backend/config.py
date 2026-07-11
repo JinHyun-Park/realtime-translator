@@ -164,6 +164,26 @@ class Settings:
     DEDUP_WINDOW_S = _f("RT_DEDUP_WINDOW_S", 7.0)      # echo arrives within this
     DEDUP_SIMILARITY = _f("RT_DEDUP_SIMILARITY", 0.72) # SequenceMatcher ratio
 
+    # --- Sentence-boundary flush -------------------------------------------------
+    # A non-stop talker used to accumulate 5+ sentences into one grey interim
+    # that only finalized on a pause or the max-segment ceiling — a huge block
+    # to re-read, and a long unstable preview. When ON, interim ASR runs with
+    # word timestamps; the moment the in-progress text contains a COMPLETED
+    # sentence with speech continuing after it, the utterance buffer is split
+    # at that word's audio position: the finished sentence finalizes NOW (goes
+    # through the normal final path — full-quality ASR + Claude translation)
+    # and the remainder keeps accumulating as a new utterance. Result: finals
+    # arrive sentence-by-sentence even with zero pauses, and the grey preview
+    # only ever holds the sentence currently being spoken.
+    SENTENCE_FLUSH = _s("RT_SENTENCE_FLUSH", "1") == "1"
+    # A real inter-sentence boundary has a small articulation gap; a spurious
+    # mid-sentence period (whisper misfire) usually doesn't. Require this gap
+    # (seconds) between the boundary word and the next word.
+    FLUSH_MIN_GAP_S = _f("RT_FLUSH_MIN_GAP_S", 0.12)
+    # Ignore boundaries inside the last N seconds of the snapshot — words at
+    # the window edge are still being revised by the interim decoder.
+    FLUSH_EDGE_MARGIN_S = _f("RT_FLUSH_EDGE_MARGIN_S", 0.25)
+
     # --- Incomplete-sentence hold ----------------------------------------------
     # A bare pause of MIN_SILENCE_MS cuts a sentence even mid-thought ("저희가
     # 이번에 검토한 <breath> 방안은..."). When the latest interim text does NOT

@@ -75,6 +75,10 @@ class AsrResult:
     text: str
     language: str
     avg_logprob: float
+    # (word_text, start_s, end_s) per word — only populated on interim calls
+    # when word timestamps were requested (sentence-boundary flush needs the
+    # audio position of the last word of a completed sentence).
+    words: list | None = None
 
 
 class Asr:
@@ -122,7 +126,8 @@ class Asr:
         buf.seek(0)
         return buf
 
-    def transcribe(self, pcm: bytes, interim: bool) -> AsrResult:
+    def transcribe(self, pcm: bytes, interim: bool,
+                   word_timestamps: bool = False) -> AsrResult:
         wav = self._pcm_to_wav(pcm)
         segments, info = self.model.transcribe(
             wav,
@@ -131,6 +136,9 @@ class Asr:
             condition_on_previous_text=False, # avoid runaway hallucinated context
             language=None,                    # auto-detect within multilingual
             task="transcribe",
+            # Word-level timings for sentence-boundary flush (interim only) —
+            # costs ~10-20% extra compute on those calls.
+            word_timestamps=word_timestamps,
             # --- hallucination suppression ---
             # whisper was trained on tons of YouTube captions, so on silence/noise
             # it loves to invent "Thank you for watching / 視聴ありがとう / 구독".
@@ -145,6 +153,7 @@ class Asr:
         # (elevated no-speech probability or weak token confidence) — only then
         # do we let the common-phrase filter kill a "thank you"/"감사합니다".
         kept = []
+        words: list = []
         any_suspect = False
         for s in segments:
             ns = getattr(s, "no_speech_prob", 0.0)
@@ -157,8 +166,13 @@ class Asr:
                 continue
             any_suspect = any_suspect or suspect
             kept.append(txt)
+            if word_timestamps and getattr(s, "words", None):
+                words.extend((w.word, w.start, w.end) for w in s.words)
         text = " ".join(kept).strip()
         if _is_hallucination(text, suspect=any_suspect):
             text = ""
+            words = []
         lang = info.language if info.language in ALLOWED_LANGS else "ko"
-        return AsrResult(text=text, language=lang, avg_logprob=info.language_probability)
+        return AsrResult(text=text, language=lang,
+                         avg_logprob=info.language_probability,
+                         words=words if word_timestamps else None)

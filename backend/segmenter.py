@@ -40,6 +40,10 @@ ENDPOINT = {
     # must outlast a LONGER hold before pure silence cuts the sentence.
     # Complete-looking sentences still finalize fast via the punctuation path.
     "incomplete_hold": settings.INCOMPLETE_HOLD,
+    # Sentence-boundary flush: finalize a COMPLETED sentence the moment more
+    # speech follows it inside the same utterance (no pause needed) — a
+    # non-stop talker gets per-sentence finals instead of 5-sentence blocks.
+    "sentence_flush": settings.SENTENCE_FLUSH,
 }
 
 # Sentence-final punctuation Whisper emits when it judges an utterance complete
@@ -82,6 +86,35 @@ def ends_sentence(text: str) -> bool:
     return last in _KO_SENTENCE_END or last in _JA_SENTENCE_END
 
 
+def find_flush_boundary(words, min_gap_s: float, edge_margin_s: float,
+                        total_s: float):
+    """Sentence-boundary flush: given interim word timings [(text, start, end)],
+    find the LAST completed-sentence boundary that is safely inside the
+    snapshot. Returns (split_time_s, n_words_before) or None.
+
+    A boundary word must end like a sentence (punctuation — whisper's own
+    completion judgment; KO/JA endings alone are too spurious word-medially),
+    be followed by more speech after a small articulation gap (>= min_gap_s —
+    a real inter-sentence junction has one; a mid-sentence decimal point
+    doesn't), and sit clear of the still-being-revised window edge
+    (edge_margin_s). Scanning from the END yields the most content per flush
+    when several sentences completed in one tick."""
+    if not words or len(words) < 2:
+        return None
+    for i in range(len(words) - 2, -1, -1):
+        w_text, _w_start, w_end = words[i]
+        t = (w_text or "").rstrip().rstrip('"”」』’\')')
+        if not t or not t.endswith(_SENTENCE_END):
+            continue
+        nxt_start = words[i + 1][1]
+        if nxt_start - w_end < min_gap_s:
+            continue
+        if w_end > total_s - edge_margin_s:
+            continue
+        return (w_end + min(min_gap_s, (nxt_start - w_end) / 2.0), i + 1)
+    return None
+
+
 @dataclass
 class SegEvent:
     kind: str            # "interim" | "final"
@@ -109,6 +142,10 @@ class Segmenter:
         # ASR text for the CURRENT utterance ended in sentence punctuation. The
         # frame loop consumes it: punctuation + a tiny pause => finalize early.
         self._sentence_complete = False
+        # Where the most recent interim snapshot began/ended inside _buf, so a
+        # word timestamp (snapshot-relative) maps to a buffer split position.
+        self._last_snapshot_start = 0
+        self._last_snapshot_len = 0
         # Whether this session's language pair involves English. When True (and
         # ENDPOINT["en_sentence_gate"] is on) a bare silence pause does NOT
         # finalize — we wait for a complete sentence or the max-segment net — so
@@ -133,6 +170,46 @@ class Segmenter:
         then waits longer (incomplete_hold x min_silence) before cutting."""
         if seq == self._seq and self._triggered:
             self._sentence_complete = False
+
+    def split_at(self, seq: int, snapshot_time_s: float) -> SegEvent | None:
+        """Sentence-boundary flush. `snapshot_time_s` is a word-timestamp
+        position INSIDE the last interim snapshot for utterance `seq`, marking
+        the end of a completed sentence with speech continuing after it. Split
+        the live buffer there: return a FINAL event for the finished sentence
+        (audio from utterance start through the boundary) and keep the
+        remainder accumulating under a NEW seq — the current sentence's grey
+        preview restarts cleanly.
+
+        Returns None if the utterance already ended/changed (stale seq) or the
+        split would leave either side too small to be meaningful."""
+        if seq != self._seq or not self._triggered:
+            return None
+        fb = settings.frame_bytes
+        # Map snapshot-relative seconds -> absolute buffer byte offset, framed.
+        byte_in_snap = int(snapshot_time_s * settings.SAMPLE_RATE) * 2
+        split = self._last_snapshot_start + byte_in_snap
+        split = (split // fb) * fb
+        min_bytes = int(settings.MIN_SPEECH_MS / settings.FRAME_MS) * fb
+        if split < min_bytes or len(self._buf) - split < fb:
+            return None
+        head = bytes(self._buf[:split])
+        remainder = self._buf[split:]
+        ev = SegEvent("final", head, self._seq)
+        # Re-arm the utterance state for the remainder: seq advances (clients
+        # key interim previews by seq — the old preview is replaced by the
+        # final; the remainder starts a fresh grey line), speech/segment clocks
+        # restart at the remainder's actual length.
+        self._seq += 1
+        self._buf = remainder
+        rem_ms = len(remainder) // fb * settings.FRAME_MS
+        self._seg_ms = rem_ms
+        self._speech_ms = rem_ms          # it was all speech (flush requires it)
+        self._silence_ms = 0
+        self._ms_since_interim = 0
+        self._sentence_complete = False
+        self._last_snapshot_start = 0
+        self._last_snapshot_len = len(remainder)
+        return ev
 
     def add_audio(self, chunk: bytes) -> list[SegEvent]:
         """Feed arbitrary-length PCM16 bytes; get back 0+ segment events."""
@@ -195,6 +272,11 @@ class Segmenter:
                 * settings.frame_bytes
             tail = bytes(self._buf[-window_bytes:]) if len(self._buf) > window_bytes \
                 else bytes(self._buf)
+            # Sentence-flush bookkeeping: remember where this snapshot began in
+            # the utterance buffer, so a word timestamp inside the snapshot can
+            # be mapped back to an absolute buffer position (split point).
+            self._last_snapshot_start = len(self._buf) - len(tail)
+            self._last_snapshot_len = len(tail)
             events.append(SegEvent("interim", tail, self._seq))
 
         # Finalize on any of:

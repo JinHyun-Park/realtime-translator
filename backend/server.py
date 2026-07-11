@@ -29,7 +29,7 @@ import websockets
 
 from asr import Asr
 from config import settings
-from segmenter import Segmenter, ENDPOINT, ends_sentence
+from segmenter import Segmenter, ENDPOINT, ends_sentence, find_flush_boundary
 from translator import Translator
 
 logging.basicConfig(
@@ -80,7 +80,7 @@ IDLE = {
 }
 
 
-async def run_asr(pcm: bytes, interim: bool):
+async def run_asr(pcm: bytes, interim: bool, word_timestamps: bool = False):
     # Retry a transient ASR failure once; never let it bubble up and kill the
     # session. Returns None on hard failure so the caller skips this segment.
     METRICS["asr_waiting"] += 1
@@ -97,7 +97,7 @@ async def run_asr(pcm: bytes, interim: bool):
             for attempt in range(2):
                 try:
                     return await loop.run_in_executor(
-                        ASR_EXEC, ASR.transcribe, pcm, interim
+                        ASR_EXEC, ASR.transcribe, pcm, interim, word_timestamps
                     )
                 except Exception:
                     if attempt == 1:
@@ -410,7 +410,9 @@ async def _handle(ws):
     async def process(ev, is_final: bool):
         t0 = _time.time()
         try:
-            res = await run_asr(ev.pcm, interim=not is_final)
+            want_words = (not is_final) and ENDPOINT.get("sentence_flush", False)
+            res = await run_asr(ev.pcm, interim=not is_final,
+                                word_timestamps=want_words)
             if res is None or not res.text.strip():
                 # A final that produced no transcription = a lost sentence.
                 if is_final:
@@ -428,6 +430,28 @@ async def _handle(ws):
                     seg.mark_sentence_complete(ev.seq)
                 else:
                     seg.mark_sentence_incomplete(ev.seq)
+                # Sentence-boundary flush: a COMPLETED sentence with speech
+                # continuing after it finalizes NOW — no pause needed. The
+                # segmenter splits the live buffer at the boundary word; the
+                # finished sentence goes through the normal final path (full
+                # ASR + Claude), the remainder keeps rolling as a new seq.
+                if want_words and res.words:
+                    snap_s = len(ev.pcm) / 2 / settings.SAMPLE_RATE
+                    b = find_flush_boundary(
+                        res.words, settings.FLUSH_MIN_GAP_S,
+                        settings.FLUSH_EDGE_MARGIN_S, snap_s)
+                    if b is not None:
+                        fin = seg.split_at(ev.seq, b[0])
+                        if fin is not None:
+                            log.info("sentence flush: seq=%s split at %.2fs "
+                                     "(%d words)", fin.seq, b[0], b[1])
+                            interim_pending.pop(ev.seq, None)  # snapshots now stale
+                            await process(fin, True)
+                            # Don't render THIS interim: its snapshot still
+                            # contains the just-finalized sentence and would
+                            # resurrect the grey line the final replaced. The
+                            # next tick previews the remainder under a new seq.
+                            return
             # Cross-stream echo dedup: with speakers, the far side's voice also
             # enters the mic — the same sentence would show as THEM and again
             # as ME. Drop the echo BEFORE spending a translation call on it.
