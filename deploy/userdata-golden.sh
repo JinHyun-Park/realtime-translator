@@ -129,6 +129,9 @@ set_env() { # key value — update in place if present, else append under [Servi
 set_env RT_ASR_WORKERS "$ASR_WORKERS"
 set_env RT_ASR_NUM_GPUS "$ASR_GPUS"
 set_env RT_RELAY_TOKEN "$RELAY_TOKEN"
+# Session history/archive bucket — enables /history + the end-of-session auto
+# summary (see userdata.sh).
+set_env RT_SESSION_BUCKET "$BUCKET"
 # Idle auto-stop OFF: shared always-on box (see userdata.sh for the rationale).
 set_env RT_IDLE_STOP_ENABLED "0"
 # Wider translation context (see userdata.sh).

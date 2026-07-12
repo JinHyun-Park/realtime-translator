@@ -118,6 +118,10 @@ Environment=RT_CONTEXT_WINDOW=6
 Environment=RT_HOST=0.0.0.0
 Environment=RT_PORT=8765
 Environment=RT_RELAY_TOKEN=__RELAY_TOKEN__
+# Session history + end-of-session archive (full transcript + auto summary)
+# land in the deploy bucket under sessions/ — enables the /history page.
+# The rt-session-log role policy (attached by launch.sh) grants the access.
+Environment=RT_SESSION_BUCKET=__BUCKET__
 # Idle auto-stop DISABLED: this box is a shared always-on server (the owner's
 # build + the shared build hit the same relay). Viewers don't count as capture
 # sessions, so a viewers-only / idle-but-wanted box would otherwise self-stop.

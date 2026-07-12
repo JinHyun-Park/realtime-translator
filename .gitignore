@@ -27,6 +27,7 @@ deploy/.admin-token
 deploy/.instance-id.big
 deploy/.golden-ami
 deploy/.eip-alloc
+deploy/.eip
 deploy/.wake-url
 
 # Personal handoff notes — contains the relay token; never publish
@@ -46,3 +47,4 @@ deploy/.shared-recipient
 # Project-internal agent context — local-only, never publish (infra IDs inside)
 /CLAUDE.md
 /.kiro/
+.omc/
