@@ -21,6 +21,13 @@ from config import settings
 # detection on short KO/JA utterances much more reliable.
 ALLOWED_LANGS = {"ko", "ja", "en"}
 
+# Hallucinated text is usually in a language NOBODY in the meeting speaks
+# ("1 tsk vanilja" = Swedish recipe text) — whisper drifting to a random
+# corpus language on noise. If the detected language is outside our
+# supported set, the segment is noise, not speech.
+def _lang_outside(lang: str) -> bool:
+    return lang not in ALLOWED_LANGS
+
 # Phrases whisper hallucinates on silence/noise (YouTube-outro training bias).
 # Two tiers, matched case-insensitively after stripping punctuation/whitespace:
 #   _OUTRO_PHRASES  — YouTube-speak nobody says in a real meeting; always dropped.
@@ -52,20 +59,39 @@ def _norm(s: str) -> str:
     return "".join(ch for ch in s.lower() if ch.isalnum() or ch.isspace()).strip()
 
 
+def _is_repetition_loop(text: str) -> bool:
+    """Whisper's other classic hallucination on noise: one phrase looped
+    ("1 tsk vanilja 1 tsk vanilja ..." x13). faster-whisper's own
+    compression-ratio check can't reject it when temperature is pinned to a
+    single value (no fallback temperature to retry with — it keeps the failed
+    result), so catch it here: enough tokens but almost no distinct ones.
+    Natural speech never repeats one word/bigram 4+ times verbatim."""
+    toks = _norm(text).split()
+    if len(toks) < 8:
+        return False
+    if len(set(toks)) / len(toks) < 0.34:
+        return True
+    # bigram loop ("tsk vanilja tsk vanilja...") — distinct pairs collapse
+    pairs = [f"{toks[i]} {toks[i+1]}" for i in range(0, len(toks) - 1, 2)]
+    return len(set(pairs)) / max(1, len(pairs)) < 0.4
+
+
 _OUTRO_NORM = {_norm(p) for p in _OUTRO_PHRASES}
 _COMMON_NORM = {_norm(p) for p in _COMMON_PHRASES}
 
 
 def _is_hallucination(text: str, suspect: bool = True) -> bool:
-    """True if `text` should be discarded as invented. Outro-speak always dies;
-    real-conversation phrases die only when `suspect` says the audio underneath
-    already looked like silence/noise."""
+    """True if `text` should be discarded as invented. Outro-speak and
+    repetition loops always die; real-conversation phrases die only when
+    `suspect` says the audio underneath already looked like silence/noise."""
     if not text:
         return False
     n = _norm(text)
     if not n:
         return True
     if n in _OUTRO_NORM:
+        return True
+    if _is_repetition_loop(text):
         return True
     return suspect and n in _COMMON_NORM
 
@@ -170,6 +196,12 @@ class Asr:
                 words.extend((w.word, w.start, w.end) for w in s.words)
         text = " ".join(kept).strip()
         if _is_hallucination(text, suspect=any_suspect):
+            text = ""
+            words = []
+        # Language sanity: detection outside {ko,ja,en} means whisper drifted
+        # to a random corpus language on noise ("1 tsk vanilja" = Swedish) —
+        # nobody in the meeting speaks it; treat the segment as silence.
+        if text and _lang_outside(info.language):
             text = ""
             words = []
         lang = info.language if info.language in ALLOWED_LANGS else "ko"
