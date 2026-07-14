@@ -281,6 +281,12 @@ What `launch.sh` builds:
 > through to the WS origin and the app's controls/insight **silently fail with HTTP 426**.
 > All of these forward query strings + the `X-Wake-Token` header (managed *AllViewerExceptHostHeader*
 > origin-request policy) and disable caching.
+>
+> ⚠️ **`/viewsock` ordering trap:** the viewer page's WebSocket connects to `/viewsock`,
+> which the `/view*` pattern ALSO matches — so a `/viewsock*` behavior targeting the
+> **WS origin (`:8765`)** must come **before** `/view*` in the behavior order. Without it,
+> the viewer socket lands on the HTTP origin, the upgrade never happens (plain 200), and
+> browser viewers sit on "재연결중…" forever while the capture app works fine.
 
 ---
 
