@@ -5,7 +5,9 @@
 Prepare this repository so Codex can continue development with reliable project
 context, component-specific instructions, and one local verification entry point.
 The setup must remain isolated from the existing Claude Code workflow and must
-not be pushed to the current GitLab `origin`.
+not be pushed to the existing `hjeongho/realtime-translator` GitLab repository.
+New Codex work will use
+`git@ssh.gitlab.aws.dev:jinstar/realtime-tanslator-openai-2026jul.git`.
 
 ## Current State
 
@@ -34,8 +36,8 @@ The root instruction file will provide:
 - Common editing rules and cross-component contracts.
 - A validation matrix based on changed paths.
 - Security rules for tokens, local state, AWS identifiers, and generated apps.
-- Git rules that prohibit pushing this branch to the existing GitLab `origin`
-  unless the user explicitly changes that instruction.
+- Git rules that prohibit pushing to the legacy GitLab repository and identify
+  the new Codex repository as the only push destination.
 
 It will direct Codex to the nearest component-level `AGENTS.md` for detailed
 instructions rather than duplicating all component knowledge.
@@ -75,6 +77,21 @@ Remote AWS verification remains component-specific. Backend or deployment
 changes that need live confirmation will first pass local checks and then use
 the existing scripts and health endpoints documented by the repository.
 
+## Remote Repository Strategy
+
+The current remote will be renamed from `origin` to `legacy` so its fetch history
+remains available without being the default push destination. A new `origin`
+will point to:
+
+```text
+git@ssh.gitlab.aws.dev:jinstar/realtime-tanslator-openai-2026jul.git
+```
+
+Codex may fetch from `legacy` when historical comparison is needed, but it must
+not push there. The `codex/bootstrap` branch and subsequent Codex work will use
+the new `origin`. The remote will be configured during implementation; pushing
+will only occur after the user explicitly requests it.
+
 ## Compatibility Boundaries
 
 This bootstrap will not:
@@ -84,7 +101,7 @@ This bootstrap will not:
   or generated artifacts.
 - Add CI automation that can deploy or operate AWS without an active Codex
   task.
-- Push commits or branches to the current GitLab `origin`.
+- Push commits or branches to the legacy GitLab repository.
 
 Because all added files are Codex documentation or an opt-in verification
 command, the existing Claude Code and runtime workflows remain unchanged.
@@ -110,5 +127,6 @@ of truth.
   for actual failures.
 - No existing source, deployment, Claude Code, or product documentation file is
   modified.
-- Work exists only on the local `codex/bootstrap` branch and is not pushed to
-  the existing GitLab remote.
+- The legacy remote is preserved under the name `legacy`, the new Codex
+  repository is configured as `origin`, and no push occurs without an explicit
+  user request.
