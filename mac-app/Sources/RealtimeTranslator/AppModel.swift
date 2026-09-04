@@ -487,18 +487,26 @@ final class AppModel: ObservableObject {
         return comp?.url
     }
 
-    /// Keep the shared box always-on: push idle-stop OFF on every wake so a
-    /// server-side env default can't start shutting it down under other users.
-    /// (No UI — the auto-stop / stop-now panel was removed for the shared relay.)
-    func disableIdleStop() {
+    /// Arm the server-side cost guard on every wake: self-stop after 4h with no
+    /// translation activity. This used to push idle-stop OFF to keep the shared
+    /// box always-on, which combined badly with the app having no stop button —
+    /// nothing ever stopped the box and it billed a GPU 24/7. A stop/start
+    /// resets the relay to its env defaults, so re-assert it after each wake.
+    /// Speech keeps the box alive (finals reset the timer), so a live meeting is
+    /// never interrupted; the rt-wake endpoint brings it back on demand.
+    func armIdleStop() {
         guard let url = controlURL("control/idle", [
-            URLQueryItem(name: "enabled", value: "0"),
+            URLQueryItem(name: "enabled", value: "1"),
+            URLQueryItem(name: "seconds", value: String(Self.idleStopSeconds)),
         ]) else { return }
         var req = URLRequest(url: url, timeoutInterval: 10)
         if !accessKey.isEmpty { req.setValue(accessKey, forHTTPHeaderField: "X-Wake-Token") }
-        rtlog("disableIdleStop (shared box stays always-on)")
+        rtlog("armIdleStop (self-stop after \(Self.idleStopSeconds)s with no translation)")
         Task { _ = try? await URLSession.shared.data(for: req) }
     }
+
+    /// Cost guard window: 4 hours of no translation activity.
+    private static let idleStopSeconds = 4 * 60 * 60
 
     /// Push the translation-model choice (Qwen vs Claude) to the live box.
     /// Called from the toggle and re-applied after every wake (server resets to
@@ -689,8 +697,8 @@ final class AppModel: ObservableObject {
         notifyReady()
         // The box just (re)booted, so its translation-model choice and
         // sentence-endpointing knobs are back at the env defaults. Re-assert the
-        // saved preferences, and force idle-stop OFF (shared box stays always-on).
-        disableIdleStop()
+        // saved preferences, and arm the 4h no-translation cost guard.
+        armIdleStop()
         applyLLMSetting()
         applyEndpointSetting()
         // Auto-press Start so one tap = end-to-end. If the user already pressed
