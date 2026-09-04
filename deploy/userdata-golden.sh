@@ -132,8 +132,9 @@ set_env RT_RELAY_TOKEN "$RELAY_TOKEN"
 # Session history/archive bucket — enables /history + the end-of-session auto
 # summary (see userdata.sh).
 set_env RT_SESSION_BUCKET "$BUCKET"
-# Idle auto-stop OFF: shared always-on box (see userdata.sh for the rationale).
-set_env RT_IDLE_STOP_ENABLED "0"
+# Idle auto-stop ON, 4h of no translation activity (see userdata.sh rationale).
+set_env RT_IDLE_STOP_ENABLED "1"
+set_env RT_IDLE_STOP_S "14400"
 # Wider translation context (see userdata.sh).
 set_env RT_CONTEXT_WINDOW "6"
 sed -i "s|Environment=CUDA_VISIBLE_DEVICES=.*|Environment=CUDA_VISIBLE_DEVICES=$ASR_CUDA|" \

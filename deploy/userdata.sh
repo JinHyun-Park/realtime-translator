@@ -122,11 +122,15 @@ Environment=RT_RELAY_TOKEN=__RELAY_TOKEN__
 # land in the deploy bucket under sessions/ — enables the /history page.
 # The rt-session-log role policy (attached by launch.sh) grants the access.
 Environment=RT_SESSION_BUCKET=__BUCKET__
-# Idle auto-stop DISABLED: this box is a shared always-on server (the owner's
-# build + the shared build hit the same relay). Viewers don't count as capture
-# sessions, so a viewers-only / idle-but-wanted box would otherwise self-stop.
-# Wake-on-demand (rt-wake Lambda) still works; nothing here turns the box ON.
-Environment=RT_IDLE_STOP_ENABLED=0
+# Idle auto-stop ON with a 4h no-translation window. Leaving it OFF (the old
+# setting) meant nothing ever stopped this box: the app has no stop button and
+# the relay only self-stopped on zero capture sockets, so a window left open
+# billed a g6e GPU (~$2.2/h) around the clock. The guard now measures actual
+# translation activity, so a live meeting is never cut off, and 4h is long
+# enough to survive lunch or a long break. Wake-on-demand still turns it back
+# ON via the rt-wake API; nothing here starts the box.
+Environment=RT_IDLE_STOP_ENABLED=1
+Environment=RT_IDLE_STOP_S=14400
 Environment=HF_HOME=/opt/hf-cache
 ExecStart=/usr/bin/python3 server.py
 Restart=always

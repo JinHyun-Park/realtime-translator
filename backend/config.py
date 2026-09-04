@@ -71,10 +71,12 @@ class Settings:
     ASR_NUM_GPUS = _i("RT_ASR_NUM_GPUS", 1)
 
     # --- auto-stop on idle (personal GPU-cost guard) ---
-    # Self-stop the EC2 box after this many seconds of ZERO capture sessions.
-    # A meeting = the Mac app pressed Start = mic+system capture WebSockets, so
-    # the box never stops mid-meeting. Viewers alone do NOT keep it alive.
-    IDLE_STOP_S = _i("RT_IDLE_STOP_S", 900)        # 15 min of zero capture
+    # Self-stop the EC2 box after this many seconds with NO TRANSLATION ACTIVITY
+    # (no finalized subtitle produced). Deliberately NOT "no capture sockets":
+    # an app left connected but silent must still let the box stop, otherwise a
+    # forgotten window bills a GPU instance for days. Speech keeps producing
+    # finals, so an active meeting is never interrupted.
+    IDLE_STOP_S = _i("RT_IDLE_STOP_S", 900)        # 15 min of no translation
     # Don't even arm the idle clock until this long after boot (cold-start grace
     # so the user has time to press Start after waking the box).
     IDLE_GRACE_S = _i("RT_IDLE_GRACE_S", 600)      # 10 min

@@ -61,19 +61,50 @@ else
   aws lambda wait function-active --function-name $FN --region $REGION
 fi
 
-# --- Function URL: AuthType NONE (token is the gate; no AWS creds in the app) ---
-if ! aws lambda get-function-url-config --function-name $FN --region $REGION >/dev/null 2>&1; then
-  aws lambda create-function-url-config --function-name $FN --region $REGION \
-    --auth-type NONE >/dev/null
-  # public invoke permission for the URL (still token-gated inside the handler)
-  aws lambda add-permission --function-name $FN --region $REGION \
-    --statement-id FunctionURLAllowPublic --action lambda:InvokeFunctionUrl \
-    --principal '*' --function-url-auth-type NONE >/dev/null 2>&1 || true
+# --- HTTP API (API Gateway) in front of the Lambda -------------------------
+# Deliberately NOT a Lambda Function URL: some AWS Organizations block Function
+# URL invocations outright — BOTH AuthType NONE and the CloudFront-OAC SigV4
+# path return 403 — which silently breaks the app's "Wake & Start" (it polls
+# /healthz forever on a box nothing ever starts). An HTTP API is not covered by
+# that guardrail and behaves identically everywhere. The shared token checked
+# inside the handler is still the only gate (no AWS creds in the app), so the
+# route AuthorizationType stays NONE, same threat model as before.
+API_NAME=rt-wake-api
+API_ID=$(aws apigatewayv2 get-apis --region $REGION \
+  --query "Items[?Name=='$API_NAME']|[0].ApiId" --output text 2>/dev/null || echo None)
+if [ "$API_ID" = "None" ] || [ -z "$API_ID" ]; then
+  API_ID=$(aws apigatewayv2 create-api --region $REGION --name $API_NAME \
+    --protocol-type HTTP --query 'ApiId' --output text)
+  echo "==> created HTTP API $API_ID"
 fi
-URL=$(aws lambda get-function-url-config --function-name $FN --region $REGION \
-  --query 'FunctionUrl' --output text)
+FN_ARN=$(aws lambda get-function-configuration --function-name $FN --region $REGION \
+  --query 'FunctionArn' --output text)
+INT_ID=$(aws apigatewayv2 get-integrations --region $REGION --api-id "$API_ID" \
+  --query 'Items[0].IntegrationId' --output text 2>/dev/null || echo None)
+if [ "$INT_ID" = "None" ] || [ -z "$INT_ID" ]; then
+  # NB: do NOT pass --integration-method here. For an AWS_PROXY Lambda
+  # integration API Gateway rejects it with a misleading "Invalid lambda
+  # function ARN", which sends you hunting a non-existent ARN problem.
+  INT_ID=$(aws apigatewayv2 create-integration --region $REGION --api-id "$API_ID" \
+    --integration-type AWS_PROXY --integration-uri "$FN_ARN" \
+    --payload-format-version 2.0 --query 'IntegrationId' --output text)
+fi
+# Re-running is a no-op: a duplicate route/stage just conflicts and is ignored.
+for RK in 'ANY /' 'ANY /{proxy+}'; do
+  aws apigatewayv2 create-route --region $REGION --api-id "$API_ID" \
+    --route-key "$RK" --target "integrations/$INT_ID" >/dev/null 2>&1 || true
+done
+aws apigatewayv2 create-stage --region $REGION --api-id "$API_ID" \
+  --stage-name '$default' --auto-deploy >/dev/null 2>&1 || true
+aws lambda add-permission --function-name $FN --region $REGION \
+  --statement-id AllowApiGatewayInvoke --action lambda:InvokeFunction \
+  --principal apigateway.amazonaws.com \
+  --source-arn "arn:aws:execute-api:$REGION:$ACCT:$API_ID/*/*" >/dev/null 2>&1 || true
+URL="https://$API_ID.execute-api.$REGION.amazonaws.com"
 
 rm -rf "$TMP"
 echo "$URL" > .wake-url
-echo "==> wake URL: $URL"
-echo "    test:  curl -s \"${URL}?token=\$(cat deploy/.relay-token)\""
+echo "==> wake endpoint: $URL"
+echo "    test:  curl -s \"$URL/wake?token=\$(cat deploy/.relay-token)\""
+echo "    NOTE: point the CloudFront /wake* behavior at this origin domain"
+echo "          (${API_ID}.execute-api.${REGION}.amazonaws.com) — no OAC needed."

@@ -77,6 +77,12 @@ _START_TS = _time.time()
 IDLE = {
     "enabled": settings.IDLE_STOP_ENABLED,
     "seconds": settings.IDLE_STOP_S,
+    # Timestamp of the last real TRANSLATION (a final that produced a subtitle).
+    # THIS — not "is a capture socket open" — is what the cost guard measures.
+    # A connection-based check can never stop a box whose app was left running
+    # but silent (overnight, or a forgotten window), which is exactly how this
+    # box ended up billing for days at a time.
+    "last_xlate": _time.time(),
 }
 
 
@@ -527,6 +533,7 @@ async def _handle(ws):
             if is_final:
                 if translation.strip():
                     METRICS["finals_total"] += 1
+                    IDLE["last_xlate"] = _time.time()  # cost-guard activity signal
                     cap_info["finals"] += 1            # operator metric counter
                     cap_info["last_ts"] = _time.time()  # room activity timestamp
                     # Accumulate the bilingual line for the end-of-session archive.
@@ -1150,39 +1157,57 @@ async def _self_stop():
         log.exception("self-stop failed (box stays up; retry next cycle)")
 
 
+def idle_stop_decision(now, last_xlate, enabled, limit_s, booted, grace_s,
+                       asr_inflight, asr_waiting):
+    """Pure decision for the idle cost guard. Returns (stop, reset_activity).
+
+    Split out of _idle_stop_loop so it can be unit-tested offline: getting this
+    wrong either bills a GPU forever (never stops) or kills a live meeting
+    (stops too eagerly), and neither is cheap. See test_idle_stop.py.
+    """
+    if not enabled:
+        return False, True            # disarmed: don't bank idle time
+    if now - booted < grace_s:
+        return False, True            # boot grace: give the user time to start
+    if asr_inflight > 0 or asr_waiting > 0:
+        return False, True            # mid-transcription is activity
+    return (now - last_xlate) >= limit_s, False
+
+
 async def _idle_stop_loop():
-    # Self-stop after IDLE["seconds"] of ZERO capture sessions. A meeting keeps
-    # active_connections>=1 (mic+system sockets), so this never fires mid-meeting.
-    # Viewers (read-only browser tabs) do NOT count — capture sessions only.
+    # Self-stop after IDLE["seconds"] with NO TRANSLATION ACTIVITY.
+    #
+    # This deliberately does NOT key off open capture sockets. That older rule
+    # ("stop only when zero capture sessions") could never stop a box whose app
+    # sat connected and silent, so a window left open overnight billed a GPU
+    # instance until someone noticed. Speech keeps producing finals, which bump
+    # IDLE["last_xlate"], so an active meeting can never be interrupted; a quiet
+    # one for IDLE["seconds"] straight is exactly what we want to shut down.
     #
     # IDLE is runtime-mutable (see /control/idle): the app can disable auto-stop
     # entirely (keep the box up) or change the timeout live. So unlike before we
     # do NOT return early when disabled — we keep looping and re-check every tick,
     # which lets the user toggle it back ON without a redeploy.
-    idle_since = None
     booted = _time.time()
-    log.info("idle-stop loop running: enabled=%s, stop after %ds idle, %ds boot grace",
-             IDLE["enabled"], IDLE["seconds"], settings.IDLE_GRACE_S)
+    log.info("idle-stop loop running: enabled=%s, stop after %ds with no translation, "
+             "%ds boot grace", IDLE["enabled"], IDLE["seconds"], settings.IDLE_GRACE_S)
     while True:
         await asyncio.sleep(settings.IDLE_CHECK_S)
-        if not IDLE["enabled"]:
-            idle_since = None          # disarmed: never accumulate idle time
+        now = _time.time()
+        stop, reset = idle_stop_decision(
+            now, IDLE["last_xlate"], IDLE["enabled"], IDLE["seconds"],
+            booted, settings.IDLE_GRACE_S,
+            METRICS["asr_inflight"], METRICS["asr_waiting"])
+        if reset:
+            IDLE["last_xlate"] = now
+        if not stop:
             continue
-        if _time.time() - booted < settings.IDLE_GRACE_S:
-            idle_since = None          # don't even arm the clock during grace
-            continue
+        quiet_s = now - IDLE["last_xlate"]
         capture = METRICS["active_connections"] - _total_viewers()
-        if capture > 0 or METRICS["asr_inflight"] > 0:
-            idle_since = None
-            continue
-        if idle_since is None:
-            idle_since = _time.time()
-            log.info("idle window started (no capture sessions)")
-        elif _time.time() - idle_since >= IDLE["seconds"]:
-            log.warning("idle %ds with zero capture sessions — self-stopping",
-                        IDLE["seconds"])
-            await _self_stop()
-            return
+        log.warning("no translation for %ds (limit %ds, %d capture session(s) still "
+                    "open) — self-stopping", int(quiet_s), IDLE["seconds"], capture)
+        await _self_stop()
+        return
 
 
 async def main():

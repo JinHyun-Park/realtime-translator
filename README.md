@@ -287,6 +287,16 @@ What `launch.sh` builds:
 > **WS origin (`:8765`)** must come **before** `/view*` in the behavior order. Without it,
 > the viewer socket lands on the HTTP origin, the upgrade never happens (plain 200), and
 > browser viewers sit on "재연결중…" forever while the capture app works fine.
+>
+> ⚠️ **`/wake` must NOT be a Lambda Function URL in some orgs:** certain AWS
+> Organizations block Function URL invocations outright — both `AuthType NONE`
+> and the CloudFront-OAC SigV4 path return **403** with a valid token. The app
+> then logs `wake returned 403 — ignoring, polling healthz` and waits forever on
+> a stopped box that nothing ever starts (looks like "the server is slow"), and
+> an older build mis-reports it as a wrong password. `deploy/wake-deploy.sh`
+> therefore provisions an **API Gateway HTTP API** instead (not covered by that
+> guardrail, same token-only gate); point the `/wake*` behavior at
+> `<api-id>.execute-api.<region>.amazonaws.com` with **no OAC**.
 
 ---
 
